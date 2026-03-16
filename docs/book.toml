@@ -1,0 +1,9 @@
+[book]
+authors = ["Gemini CLI"]
+language = "ja"
+multilingual = false
+src = "src"
+title = "Jubako Specifications"
+
+[output.html]
+git-repository-url = "https://github.com/user/Jubako"
