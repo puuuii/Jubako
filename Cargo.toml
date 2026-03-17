@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-iced = { version = "0.13", features = ["tokio", "advanced"] }
+iced = { version = "0.13", features = ["tokio", "advanced", "image"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 arboard = "3.4"
 global-hotkey = "0.6"

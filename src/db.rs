@@ -25,6 +25,7 @@ pub struct Item {
     pub label: Option<String>,
     pub created_at: DateTime<Utc>,
     pub is_favorite: bool,
+    pub content_blob: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for Db {
@@ -50,6 +51,7 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         label: row.get(4)?,
         created_at: parse_datetime(&row.get::<_, String>(5)?),
         is_favorite: row.get::<_, i64>(6)? != 0,
+        content_blob: row.get(7)?,
     })
 }
 
@@ -107,9 +109,18 @@ impl Db {
         )
         .context("Failed to create tables")?;
 
+        // Migration: add content_blob column if it doesn't already exist.
+        Self::migrate_add_content_blob(&conn);
+
         Ok(Db {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Attempt to add the `content_blob` column. Silently ignores the error
+    /// when the column already exists (i.e. duplicate column name).
+    fn migrate_add_content_blob(conn: &Connection) {
+        let _ = conn.execute_batch("ALTER TABLE items ADD COLUMN content_blob BLOB");
     }
 
     // ───────────────────────── Item operations ─────────────────────────
@@ -131,7 +142,7 @@ impl Db {
     pub fn get_history(&self, limit: usize) -> Result<Vec<Item>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, folder_id, content_type, content_data, label, created_at, is_favorite
+            "SELECT id, folder_id, content_type, content_data, label, created_at, is_favorite, content_blob
              FROM items
              WHERE folder_id IS NULL
              ORDER BY created_at DESC
@@ -146,7 +157,7 @@ impl Db {
     pub fn get_items_in_folder(&self, folder_id: i64) -> Result<Vec<Item>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, folder_id, content_type, content_data, label, created_at, is_favorite
+            "SELECT id, folder_id, content_type, content_data, label, created_at, is_favorite, content_blob
              FROM items
              WHERE folder_id = ?1
              ORDER BY created_at DESC",
@@ -210,7 +221,7 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let pattern = format!("%{}%", query);
         let mut stmt = conn.prepare(
-            "SELECT id, folder_id, content_type, content_data, label, created_at, is_favorite
+            "SELECT id, folder_id, content_type, content_data, label, created_at, is_favorite, content_blob
              FROM items
              WHERE content_data LIKE ?1 OR label LIKE ?1
              ORDER BY created_at DESC
@@ -233,6 +244,39 @@ impl Db {
         )?;
 
         let mut rows = stmt.query(params![content])?;
+        match rows.next()? {
+            Some(row) => {
+                let id: i64 = row.get(0)?;
+                Ok(Some(id))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Insert a new image clipboard item with no folder (goes into history).
+    /// `description` is a string stored in `content_data` (e.g. dimensions and hash).
+    /// `rgba_data` is the raw RGBA pixel data stored in `content_blob`.
+    /// Returns the new item's row id.
+    pub fn insert_image_item(&self, description: &str, rgba_data: &[u8]) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO items (folder_id, content_type, content_data, content_blob, created_at)
+             VALUES (NULL, 'image', ?1, ?2, ?3)",
+            params![description, rgba_data, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Check if an image item with the exact same description already exists
+    /// in the history (folder_id IS NULL, content_type = 'image').
+    /// Returns `Some(id)` if a duplicate is found, `None` otherwise.
+    pub fn check_image_duplicate(&self, description: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM items WHERE folder_id IS NULL AND content_type = 'image' AND content_data = ?1 LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![description])?;
         match rows.next()? {
             Some(row) => {
                 let id: i64 = row.get(0)?;

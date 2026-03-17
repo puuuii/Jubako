@@ -1,14 +1,17 @@
-use arboard::Clipboard;
+use arboard::{Clipboard, ImageData};
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use iced::widget::{
-    button, column, container, horizontal_rule, horizontal_space, row, scrollable, text,
+    button, column, container, horizontal_rule, horizontal_space, image, row, scrollable, text,
     text_input, Column, Row, Space,
 };
 use iced::{event, window, Color, Element, Event, Length, Point, Size, Subscription, Task, Theme};
+use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -60,6 +63,11 @@ enum Message {
     WindowFocusLost,
     // Item actions
     PasteItem(String),
+    PasteImageItem {
+        width: usize,
+        height: usize,
+        rgba: Vec<u8>,
+    },
     DeleteItem(i64),
     OpenRenameItem(i64, Option<String>),
     OpenMoveItem(i64),
@@ -87,6 +95,7 @@ struct Jubako {
     db: Arc<Db>,
     clipboard: Arc<Mutex<Clipboard>>,
     last_clipboard_content: String,
+    last_clipboard_image_hash: u64,
     // Current view
     current_view: ViewMode,
     items: Vec<Item>,
@@ -162,6 +171,28 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
+// ────────────────────── Helper: hash image data ─────────────────────────
+
+/// Compute a fast hash of image RGBA bytes for duplicate detection.
+fn hash_image_data(img: &ImageData<'_>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    img.width.hash(&mut hasher);
+    img.height.hash(&mut hasher);
+    img.bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Parse the image description string (format: "WxH:HEX_HASH") back into
+/// width and height.
+fn parse_image_description(desc: &str) -> Option<(usize, usize)> {
+    // Format: "WIDTHxHEIGHT:HASH"
+    let dim_part = desc.split(':').next()?;
+    let mut parts = dim_part.split('x');
+    let w: usize = parts.next()?.parse().ok()?;
+    let h: usize = parts.next()?.parse().ok()?;
+    Some((w, h))
+}
+
 // ────────────────────────────── Entry point ─────────────────────────────
 
 pub fn main() -> iced::Result {
@@ -202,6 +233,7 @@ impl Jubako {
             db: db.clone(),
             clipboard,
             last_clipboard_content: String::new(),
+            last_clipboard_image_hash: 0,
             current_view: ViewMode::History,
             items: Vec::new(),
             folders: Vec::new(),
@@ -221,6 +253,7 @@ impl Jubako {
         // Capture whatever is already on the clipboard and save it to DB
         // so that content copied before the app started is also shown in the UI.
         if let Ok(mut cb) = app.clipboard.lock() {
+            // Try text first
             if let Ok(txt) = cb.get_text() {
                 if !txt.is_empty() {
                     app.last_clipboard_content = txt.clone();
@@ -229,6 +262,18 @@ impl Jubako {
                         _ => {
                             let _ = app.db.insert_item(&txt, "text");
                         }
+                    }
+                }
+            }
+            // Try image
+            if let Ok(img) = cb.get_image() {
+                let hash = hash_image_data(&img);
+                app.last_clipboard_image_hash = hash;
+                let desc = format!("{}x{}:{:016x}", img.width, img.height, hash);
+                match app.db.check_image_duplicate(&desc) {
+                    Ok(Some(_existing_id)) => { /* already stored */ }
+                    _ => {
+                        let _ = app.db.insert_image_item(&desc, &img.bytes);
                     }
                 }
             }
@@ -360,9 +405,12 @@ impl Jubako {
                 let mut should_refresh = false;
                 {
                     if let Ok(mut cb) = self.clipboard.lock() {
+                        // Check for text content
+                        let mut text_changed = false;
                         if let Ok(txt) = cb.get_text() {
                             if !txt.is_empty() && txt != self.last_clipboard_content {
                                 self.last_clipboard_content = txt.clone();
+                                text_changed = true;
                                 // Duplicate check
                                 match self.db.check_duplicate(&txt) {
                                     Ok(Some(_existing_id)) => {
@@ -379,6 +427,34 @@ impl Jubako {
                                     && self.search_query.is_empty()
                                 {
                                     should_refresh = true;
+                                }
+                            }
+                        }
+
+                        // Check for image content (only if text didn't change,
+                        // to avoid capturing both text and image from the same copy)
+                        if !text_changed {
+                            if let Ok(img) = cb.get_image() {
+                                let hash = hash_image_data(&img);
+                                if hash != self.last_clipboard_image_hash {
+                                    self.last_clipboard_image_hash = hash;
+                                    let desc =
+                                        format!("{}x{}:{:016x}", img.width, img.height, hash);
+                                    match self.db.check_image_duplicate(&desc) {
+                                        Ok(Some(_existing_id)) => { /* already stored */ }
+                                        _ => {
+                                            if let Err(e) =
+                                                self.db.insert_image_item(&desc, &img.bytes)
+                                            {
+                                                eprintln!("Failed to save image item: {}", e);
+                                            }
+                                        }
+                                    }
+                                    if self.current_view == ViewMode::History
+                                        && self.search_query.is_empty()
+                                    {
+                                        should_refresh = true;
+                                    }
                                 }
                             }
                         }
@@ -416,6 +492,45 @@ impl Jubako {
                 if let Ok(mut cb) = self.clipboard.lock() {
                     let _ = cb.set_text(content.clone());
                     self.last_clipboard_content = content;
+                }
+
+                // Hide window first, then schedule the paste simulation
+                self.is_visible = false;
+                self.dialog = None;
+                self.expanded_item_actions = None;
+
+                let enigo = self.enigo.clone();
+
+                window::get_latest()
+                    .and_then(move |id| window::change_mode::<Message>(id, window::Mode::Hidden))
+                    .chain(Task::perform(
+                        async move {
+                            tokio::time::sleep(Duration::from_millis(150)).await;
+                            if let Ok(mut e) = enigo.lock() {
+                                let _ = e.key(Key::Control, Direction::Press);
+                                let _ = e.key(Key::Unicode('v'), Direction::Click);
+                                let _ = e.key(Key::Control, Direction::Release);
+                            }
+                        },
+                        |_| Message::Noop,
+                    ))
+            }
+
+            Message::PasteImageItem {
+                width,
+                height,
+                rgba,
+            } => {
+                // Set image to clipboard
+                if let Ok(mut cb) = self.clipboard.lock() {
+                    let img = ImageData {
+                        width,
+                        height,
+                        bytes: Cow::Owned(rgba),
+                    };
+                    let hash = hash_image_data(&img);
+                    let _ = cb.set_image(img);
+                    self.last_clipboard_image_hash = hash;
                 }
 
                 // Hide window first, then schedule the paste simulation
@@ -874,23 +989,62 @@ impl Jubako {
 
     fn view_item(&self, item: &Item) -> Element<'_, Message> {
         let item_id = item.id;
-        let display_text = item
-            .label
-            .as_ref()
-            .map(|l| truncate_str(l, 80))
-            .unwrap_or_else(|| truncate_str(&item.content_data, 80));
-
-        // Replace newlines for display
-        let display_text = display_text.replace('\n', " \u{21B5} ");
+        let is_image = item.content_type == "image";
 
         let timestamp = item.created_at.format("%m/%d %H:%M").to_string();
 
         let fav_icon = if item.is_favorite { "\u{2605}" } else { "" };
 
-        let content_btn = button(
-            column![
+        let press_message: Message = if is_image {
+            if let Some(ref blob) = item.content_blob {
+                if let Some((w, h)) = parse_image_description(&item.content_data) {
+                    Message::PasteImageItem {
+                        width: w,
+                        height: h,
+                        rgba: blob.clone(),
+                    }
+                } else {
+                    Message::Noop
+                }
+            } else {
+                Message::Noop
+            }
+        } else {
+            Message::PasteItem(item.content_data.clone())
+        };
+
+        // Build the inner content depending on type
+        let content_btn = if is_image {
+            let dims = parse_image_description(&item.content_data);
+            let dim_label = dims
+                .map(|(w, h)| format!("\u{1F5BC} Image ({}x{})", w, h))
+                .unwrap_or_else(|| "\u{1F5BC} Image".to_string());
+
+            let display_label = item
+                .label
+                .as_ref()
+                .map(|l| truncate_str(l, 60))
+                .unwrap_or(dim_label);
+
+            // Build a thumbnail from RGBA data if available
+            let mut content_col = Column::new().spacing(2);
+
+            if let (Some(ref blob), Some((w, h))) = (&item.content_blob, dims) {
+                let handle = image::Handle::from_rgba(w as u32, h as u32, blob.clone());
+                content_col = content_col.push(
+                    container(
+                        image(handle)
+                            .content_fit(iced::ContentFit::ScaleDown)
+                            .width(Length::Fixed(120.0))
+                            .height(Length::Fixed(80.0)),
+                    )
+                    .padding(2),
+                );
+            }
+
+            content_col = content_col.push(
                 row![
-                    text(display_text)
+                    text(display_label)
                         .size(13)
                         .shaping(text::Shaping::Advanced)
                         .width(Length::Fill),
@@ -900,16 +1054,52 @@ impl Jubako {
                         .color(Color::from_rgb(1.0, 0.85, 0.0)),
                 ]
                 .spacing(4),
+            );
+            content_col = content_col.push(
                 text(timestamp)
                     .size(10)
                     .color(Color::from_rgb(0.5, 0.5, 0.5)),
-            ]
-            .spacing(2),
-        )
-        .on_press(Message::PasteItem(item.content_data.clone()))
-        .style(button::text)
-        .width(Length::Fill)
-        .padding([6, 8]);
+            );
+
+            button(content_col)
+                .on_press(press_message)
+                .style(button::text)
+                .width(Length::Fill)
+                .padding([6, 8])
+        } else {
+            let display_text = item
+                .label
+                .as_ref()
+                .map(|l| truncate_str(l, 80))
+                .unwrap_or_else(|| truncate_str(&item.content_data, 80));
+
+            // Replace newlines for display
+            let display_text = display_text.replace('\n', " \u{21B5} ");
+
+            button(
+                column![
+                    row![
+                        text(display_text)
+                            .size(13)
+                            .shaping(text::Shaping::Advanced)
+                            .width(Length::Fill),
+                        text(fav_icon)
+                            .size(13)
+                            .shaping(text::Shaping::Advanced)
+                            .color(Color::from_rgb(1.0, 0.85, 0.0)),
+                    ]
+                    .spacing(4),
+                    text(timestamp)
+                        .size(10)
+                        .color(Color::from_rgb(0.5, 0.5, 0.5)),
+                ]
+                .spacing(2),
+            )
+            .on_press(press_message)
+            .style(button::text)
+            .width(Length::Fill)
+            .padding([6, 8])
+        };
 
         let action_btn = button(text("\u{22EE}").size(16).shaping(text::Shaping::Advanced))
             .on_press(Message::ToggleItemActions(item_id))
