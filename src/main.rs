@@ -2,7 +2,7 @@ use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyEvent, GlobalHotKeyManager,
+    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use iced::widget::{
     button, column, container, horizontal_rule, horizontal_space, row, scrollable, text,
@@ -217,10 +217,24 @@ impl Jubako {
 
         // Load initial data
         app.load_folders();
-        app.load_items();
-        if let Some(first) = app.items.first() {
-            app.last_clipboard_content = first.content_data.clone();
+
+        // Capture whatever is already on the clipboard and save it to DB
+        // so that content copied before the app started is also shown in the UI.
+        if let Ok(mut cb) = app.clipboard.lock() {
+            if let Ok(txt) = cb.get_text() {
+                if !txt.is_empty() {
+                    app.last_clipboard_content = txt.clone();
+                    match app.db.check_duplicate(&txt) {
+                        Ok(Some(_existing_id)) => { /* already stored */ }
+                        _ => {
+                            let _ = app.db.insert_item(&txt, "text");
+                        }
+                    }
+                }
+            }
         }
+
+        app.load_items();
 
         // Apply tool-window style shortly after launch
         let task = Task::perform(
@@ -1110,7 +1124,13 @@ impl Jubako {
                     tokio::task::spawn_blocking(|| GlobalHotKeyEvent::receiver().recv()).await;
 
                 match result {
-                    Ok(Ok(_event)) => Some((Message::ToggleWindow, ())),
+                    Ok(Ok(event)) if event.state == HotKeyState::Pressed => {
+                        Some((Message::ToggleWindow, ()))
+                    }
+                    Ok(Ok(_released)) => {
+                        // Ignore Released events
+                        Some((Message::Noop, ()))
+                    }
                     _ => {
                         // If the channel is disconnected, sleep to avoid busy loop
                         tokio::time::sleep(Duration::from_millis(100)).await;
