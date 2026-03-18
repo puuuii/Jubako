@@ -137,6 +137,42 @@ fn get_cursor_position() -> Option<Point> {
     None
 }
 
+/// Return the top-left corner and size of the monitor that contains the cursor.
+#[cfg(target_os = "windows")]
+fn get_monitor_rect_at_cursor() -> Option<(Point, Size)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut pt).is_err() {
+            return None;
+        }
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            let rc = mi.rcMonitor;
+            Some((
+                Point::new(rc.left as f32, rc.top as f32),
+                Size::new((rc.right - rc.left) as f32, (rc.bottom - rc.top) as f32),
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_monitor_rect_at_cursor() -> Option<(Point, Size)> {
+    None
+}
+
 // ────────────────────── Helper: set tool window style ───────────────────
 
 /// After the window is created we flip on WS_EX_TOOLWINDOW so that the
@@ -347,12 +383,37 @@ impl Jubako {
         self.refresh_data();
 
         let cursor_pos = get_cursor_position();
+        let monitor_rect = get_monitor_rect_at_cursor();
+        const WINDOW_WIDTH: f32 = 800.0;
+        const WINDOW_HEIGHT: f32 = 600.0;
 
         window::get_latest().and_then(move |id| {
             let mut tasks: Vec<Task<Message>> = Vec::new();
 
             if let Some(pos) = cursor_pos {
-                tasks.push(window::move_to(id, pos));
+                let adjusted = if let Some((mon_origin, mon_size)) = monitor_rect {
+                    let mon_mid_x = mon_origin.x + mon_size.width / 2.0;
+                    let mon_mid_y = mon_origin.y + mon_size.height / 2.0;
+
+                    let x = if pos.x >= mon_mid_x {
+                        // Cursor is in the right half — extend window to the left.
+                        pos.x - WINDOW_WIDTH
+                    } else {
+                        pos.x
+                    };
+
+                    let y = if pos.y >= mon_mid_y {
+                        // Cursor is in the lower half — extend window upward.
+                        pos.y - WINDOW_HEIGHT
+                    } else {
+                        pos.y
+                    };
+
+                    Point::new(x, y)
+                } else {
+                    pos
+                };
+                tasks.push(window::move_to(id, adjusted));
             }
             tasks.push(window::change_mode(id, window::Mode::Windowed));
             tasks.push(window::gain_focus(id));
