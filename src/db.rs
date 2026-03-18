@@ -13,13 +13,11 @@ pub struct Folder {
     pub id: i64,
     pub parent_id: Option<i64>,
     pub name: String,
-    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Item {
     pub id: i64,
-    pub folder_id: Option<i64>,
     pub content_type: String,
     pub content_data: String,
     pub label: Option<String>,
@@ -45,7 +43,6 @@ fn parse_datetime(s: &str) -> DateTime<Utc> {
 fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
     Ok(Item {
         id: row.get(0)?,
-        folder_id: row.get(1)?,
         content_type: row.get(2)?,
         content_data: row.get(3)?,
         label: row.get(4)?,
@@ -60,7 +57,6 @@ fn row_to_folder(row: &rusqlite::Row<'_>) -> rusqlite::Result<Folder> {
         id: row.get(0)?,
         parent_id: row.get(1)?,
         name: row.get(2)?,
-        created_at: parse_datetime(&row.get::<_, String>(3)?),
     })
 }
 
@@ -177,42 +173,11 @@ impl Db {
         Ok(())
     }
 
-    /// Set or change the label of an item.
-    pub fn rename_item(&self, item_id: i64, label: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE items SET label = ?1 WHERE id = ?2",
-            params![label, item_id],
-        )?;
-        Ok(())
-    }
-
     /// Delete an item by id.
     pub fn delete_item(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM items WHERE id = ?1", params![id])?;
         Ok(())
-    }
-
-    /// Toggle the favourite flag on an item and return the new state.
-    pub fn toggle_favorite(&self, id: i64) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE items SET is_favorite = CASE WHEN is_favorite = 0 THEN 1 ELSE 0 END
-             WHERE id = ?1",
-            params![id],
-        )?;
-
-        let new_status: bool = conn.query_row(
-            "SELECT is_favorite FROM items WHERE id = ?1",
-            params![id],
-            |row| {
-                let val: i64 = row.get(0)?;
-                Ok(val != 0)
-            },
-        )?;
-
-        Ok(new_status)
     }
 
     /// Search items whose `content_data` or `label` matches the query
@@ -296,34 +261,6 @@ impl Db {
              FROM folders
              ORDER BY name",
         )?;
-
-        let rows = stmt.query_map([], row_to_folder)?;
-        rows.collect()
-    }
-
-    /// Get child folders of a given parent. Pass `None` to get root-level
-    /// folders (where parent_id IS NULL).
-    pub fn get_child_folders(&self, parent_id: Option<i64>) -> Result<Vec<Folder>> {
-        let conn = self.conn.lock().unwrap();
-
-        let mut stmt = match parent_id {
-            Some(pid) => {
-                let mut s = conn.prepare(
-                    "SELECT id, parent_id, name, created_at
-                     FROM folders
-                     WHERE parent_id = ?1
-                     ORDER BY name",
-                )?;
-                let rows = s.query_map(params![pid], row_to_folder)?;
-                return rows.collect();
-            }
-            None => conn.prepare(
-                "SELECT id, parent_id, name, created_at
-                 FROM folders
-                 WHERE parent_id IS NULL
-                 ORDER BY name",
-            )?,
-        };
 
         let rows = stmt.query_map([], row_to_folder)?;
         rows.collect()
