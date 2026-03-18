@@ -5,10 +5,12 @@ use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use iced::widget::{
-    button, column, container, horizontal_rule, horizontal_space, image, row, scrollable, text,
-    text_input, Column, Row, Space,
+    button, column, container, horizontal_rule, horizontal_space, image, mouse_area, row,
+    scrollable, text, text_input, Column, Row, Space,
 };
-use iced::{event, window, Color, Element, Event, Length, Point, Size, Subscription, Task, Theme};
+use iced::{
+    event, mouse, window, Color, Element, Event, Length, Point, Size, Subscription, Task, Theme,
+};
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -30,10 +32,6 @@ enum ViewMode {
 
 #[derive(Debug, Clone)]
 enum Dialog {
-    RenameItem {
-        item_id: i64,
-        current_label: String,
-    },
     RenameFolder {
         folder_id: i64,
         current_name: String,
@@ -41,9 +39,6 @@ enum Dialog {
     NewFolder {
         parent_id: Option<i64>,
         name: String,
-    },
-    MoveToFolder {
-        item_id: i64,
     },
 }
 
@@ -69,10 +64,13 @@ enum Message {
         rgba: Vec<u8>,
     },
     DeleteItem(i64),
-    OpenRenameItem(i64, Option<String>),
-    OpenMoveItem(i64),
-    MoveItemToFolder(i64, Option<i64>),
-    RenameItem,
+    // Drag & Drop
+    StartDragItem(i64),
+    DragOverFolder(i64),
+    DragOverHistory,
+    DropOnFolder(i64),
+    DropOnHistory,
+    CancelDrag,
     // Folder actions
     OpenNewFolder(Option<i64>),
     CreateFolder,
@@ -83,7 +81,6 @@ enum Message {
     DialogInputChanged(String),
     CloseDialog,
     // Action panel toggle
-    ToggleItemActions(i64),
     ToggleFolderActions(i64),
     // No-op
     Noop,
@@ -111,10 +108,11 @@ struct Jubako {
     dialog: Option<Dialog>,
     // For paste simulation
     enigo: Arc<Mutex<Enigo>>,
-    // Which item currently has its action panel expanded
-    expanded_item_actions: Option<i64>,
     // Which folder currently has its action panel expanded
     expanded_folder_actions: Option<i64>,
+    // Drag & Drop state
+    dragging_item_id: Option<i64>,
+    drag_over_folder: Option<Option<i64>>, // Some(Some(folder_id)) or Some(None) for History
 }
 
 // ────────────────────────── Helper: get cursor position ─────────────────
@@ -243,8 +241,9 @@ impl Jubako {
             is_visible: false,
             dialog: None,
             enigo,
-            expanded_item_actions: None,
             expanded_folder_actions: None,
+            dragging_item_id: None,
+            drag_over_folder: None,
         };
 
         // Load initial data
@@ -341,8 +340,9 @@ impl Jubako {
     fn show_window(&mut self) -> Task<Message> {
         self.is_visible = true;
         self.search_query.clear();
-        self.expanded_item_actions = None;
         self.expanded_folder_actions = None;
+        self.dragging_item_id = None;
+        self.drag_over_folder = None;
         self.dialog = None;
         self.refresh_data();
 
@@ -363,8 +363,9 @@ impl Jubako {
 
     fn hide_window(&mut self) -> Task<Message> {
         self.is_visible = false;
-        self.expanded_item_actions = None;
         self.expanded_folder_actions = None;
+        self.dragging_item_id = None;
+        self.drag_over_folder = None;
         self.dialog = None;
 
         window::get_latest().and_then(|id| window::change_mode(id, window::Mode::Hidden))
@@ -394,7 +395,6 @@ impl Jubako {
             Message::SelectView(view) => {
                 self.current_view = view;
                 self.search_query.clear();
-                self.expanded_item_actions = None;
                 self.expanded_folder_actions = None;
                 self.load_items();
                 Task::none()
@@ -497,7 +497,6 @@ impl Jubako {
                 // Hide window first, then schedule the paste simulation
                 self.is_visible = false;
                 self.dialog = None;
-                self.expanded_item_actions = None;
 
                 let enigo = self.enigo.clone();
 
@@ -536,7 +535,6 @@ impl Jubako {
                 // Hide window first, then schedule the paste simulation
                 self.is_visible = false;
                 self.dialog = None;
-                self.expanded_item_actions = None;
 
                 let enigo = self.enigo.clone();
 
@@ -558,48 +556,52 @@ impl Jubako {
             // ── Item: delete ──
             Message::DeleteItem(id) => {
                 let _ = self.db.delete_item(id);
-                self.expanded_item_actions = None;
                 self.refresh_data();
                 Task::none()
             }
 
-            // ── Item: rename dialog ──
-            Message::OpenRenameItem(id, current) => {
-                self.dialog = Some(Dialog::RenameItem {
-                    item_id: id,
-                    current_label: current.unwrap_or_default(),
-                });
-                self.expanded_item_actions = None;
+            // ── Drag & Drop ──
+            Message::StartDragItem(id) => {
+                self.dragging_item_id = Some(id);
+                self.drag_over_folder = None;
                 Task::none()
             }
 
-            Message::RenameItem => {
-                if let Some(Dialog::RenameItem {
-                    item_id,
-                    ref current_label,
-                }) = self.dialog
-                {
-                    let label = current_label.clone();
-                    if !label.is_empty() {
-                        let _ = self.db.rename_item(item_id, &label);
-                    }
+            Message::DragOverFolder(folder_id) => {
+                if self.dragging_item_id.is_some() {
+                    self.drag_over_folder = Some(Some(folder_id));
                 }
-                self.dialog = None;
-                self.refresh_data();
                 Task::none()
             }
 
-            // ── Item: move dialog ──
-            Message::OpenMoveItem(id) => {
-                self.dialog = Some(Dialog::MoveToFolder { item_id: id });
-                self.expanded_item_actions = None;
+            Message::DragOverHistory => {
+                if self.dragging_item_id.is_some() {
+                    self.drag_over_folder = Some(None);
+                }
                 Task::none()
             }
 
-            Message::MoveItemToFolder(item_id, folder_id) => {
-                let _ = self.db.move_item_to_folder(item_id, folder_id);
-                self.dialog = None;
-                self.refresh_data();
+            Message::DropOnFolder(folder_id) => {
+                if let Some(item_id) = self.dragging_item_id.take() {
+                    let _ = self.db.move_item_to_folder(item_id, Some(folder_id));
+                    self.refresh_data();
+                }
+                self.drag_over_folder = None;
+                Task::none()
+            }
+
+            Message::DropOnHistory => {
+                if let Some(item_id) = self.dragging_item_id.take() {
+                    let _ = self.db.move_item_to_folder(item_id, None);
+                    self.refresh_data();
+                }
+                self.drag_over_folder = None;
+                Task::none()
+            }
+
+            Message::CancelDrag => {
+                self.dragging_item_id = None;
+                self.drag_over_folder = None;
                 Task::none()
             }
 
@@ -668,10 +670,6 @@ impl Jubako {
             // ── Dialog ──
             Message::DialogInputChanged(value) => {
                 match &mut self.dialog {
-                    Some(Dialog::RenameItem {
-                        ref mut current_label,
-                        ..
-                    }) => *current_label = value,
                     Some(Dialog::RenameFolder {
                         ref mut current_name,
                         ..
@@ -688,23 +686,12 @@ impl Jubako {
             }
 
             // ── Action panel toggles ──
-            Message::ToggleItemActions(id) => {
-                if self.expanded_item_actions == Some(id) {
-                    self.expanded_item_actions = None;
-                } else {
-                    self.expanded_item_actions = Some(id);
-                }
-                self.expanded_folder_actions = None;
-                Task::none()
-            }
-
             Message::ToggleFolderActions(id) => {
                 if self.expanded_folder_actions == Some(id) {
                     self.expanded_folder_actions = None;
                 } else {
                     self.expanded_folder_actions = Some(id);
                 }
-                self.expanded_item_actions = None;
                 Task::none()
             }
         }
@@ -817,16 +804,42 @@ impl Jubako {
             button::text
         };
 
-        col = col.push(
-            button(
-                text("\u{1F4CB} History")
-                    .shaping(text::Shaping::Advanced)
-                    .size(14),
-            )
-            .on_press(Message::SelectView(ViewMode::History))
-            .style(history_style)
-            .width(Length::Fill),
-        );
+        let is_history_drop_target =
+            self.dragging_item_id.is_some() && self.drag_over_folder == Some(None);
+
+        let history_btn = button(
+            text("\u{1F4CB} History")
+                .shaping(text::Shaping::Advanced)
+                .size(14),
+        )
+        .on_press(Message::SelectView(ViewMode::History))
+        .style(history_style)
+        .width(Length::Fill);
+
+        let history_entry: Element<'_, Message> = if self.dragging_item_id.is_some() {
+            mouse_area(container(history_btn).style(move |_theme: &Theme| {
+                if is_history_drop_target {
+                    container::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb(0.2, 0.3, 0.5))),
+                        border: iced::Border {
+                            color: Color::from_rgb(0.3, 0.5, 0.8),
+                            width: 2.0,
+                            radius: 4.0.into(),
+                        },
+                        ..container::Style::default()
+                    }
+                } else {
+                    container::Style::default()
+                }
+            }))
+            .on_enter(Message::DragOverHistory)
+            .on_release(Message::DropOnHistory)
+            .into()
+        } else {
+            history_btn.into()
+        };
+
+        col = col.push(history_entry);
 
         col = col.push(horizontal_rule(1));
 
@@ -872,6 +885,9 @@ impl Jubako {
         let folder_icon = "\u{1F4C1}";
         let label_text = format!("{} {}", folder_icon, folder.name);
 
+        let is_drop_target =
+            self.dragging_item_id.is_some() && self.drag_over_folder == Some(Some(folder_id));
+
         let folder_btn = button(text(label_text).shaping(text::Shaping::Advanced).size(13))
             .on_press(Message::SelectView(ViewMode::Folder(folder_id)))
             .style(btn_style)
@@ -883,11 +899,34 @@ impl Jubako {
             .style(button::text)
             .padding(2);
 
-        let folder_row = Row::new()
+        let inner_row = Row::new()
             .push(Space::new(indent, 0))
             .push(folder_btn)
             .push(actions_btn)
             .align_y(iced::Alignment::Center);
+
+        let folder_row: Element<'_, Message> = if self.dragging_item_id.is_some() {
+            mouse_area(container(inner_row).style(move |_theme: &Theme| {
+                if is_drop_target {
+                    container::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb(0.2, 0.3, 0.5))),
+                        border: iced::Border {
+                            color: Color::from_rgb(0.3, 0.5, 0.8),
+                            width: 2.0,
+                            radius: 4.0.into(),
+                        },
+                        ..container::Style::default()
+                    }
+                } else {
+                    container::Style::default()
+                }
+            }))
+            .on_enter(Message::DragOverFolder(folder_id))
+            .on_release(Message::DropOnFolder(folder_id))
+            .into()
+        } else {
+            inner_row.into()
+        };
 
         let mut col = Column::new().spacing(1);
         col = col.push(folder_row);
@@ -1101,54 +1140,54 @@ impl Jubako {
             .padding([6, 8])
         };
 
-        let action_btn = button(text("\u{22EE}").size(16).shaping(text::Shaping::Advanced))
-            .on_press(Message::ToggleItemActions(item_id))
-            .style(button::text)
-            .padding([4, 6]);
-
-        let mut col = Column::new().spacing(0);
-
-        col = col.push(
-            row![content_btn, action_btn]
-                .spacing(0)
-                .align_y(iced::Alignment::Center),
-        );
-
-        // Expanded action panel
-        if self.expanded_item_actions == Some(item_id) {
-            let panel = container(
-                row![
-                    button(text("Move").size(11))
-                        .on_press(Message::OpenMoveItem(item_id))
-                        .style(button::secondary)
-                        .padding([3, 8]),
-                    button(text("Rename").size(11))
-                        .on_press(Message::OpenRenameItem(item_id, item.label.clone()))
-                        .style(button::secondary)
-                        .padding([3, 8]),
-                    button(text("Delete").size(11))
-                        .on_press(Message::DeleteItem(item_id))
-                        .style(button::danger)
-                        .padding([3, 8]),
-                ]
-                .spacing(6),
+        // Drag handle (⠿) — wrapped in mouse_area to initiate D&D
+        let drag_handle: Element<'_, Message> = mouse_area(
+            container(
+                text("\u{2807}")
+                    .size(14)
+                    .shaping(text::Shaping::Advanced)
+                    .color(Color::from_rgb(0.45, 0.45, 0.45)),
             )
-            .padding(iced::Padding {
-                top: 2.0,
-                right: 8.0,
-                bottom: 6.0,
-                left: 8.0,
-            });
+            .padding([6, 4]),
+        )
+        .on_press(Message::StartDragItem(item_id))
+        .interaction(if self.dragging_item_id == Some(item_id) {
+            iced::mouse::Interaction::Grabbing
+        } else {
+            iced::mouse::Interaction::Grab
+        })
+        .into();
 
-            col = col.push(panel);
-        }
+        let delete_btn = button(
+            text("\u{00D7}")
+                .size(16)
+                .shaping(text::Shaping::Advanced)
+                .color(Color::from_rgb(0.6, 0.6, 0.6)),
+        )
+        .on_press(Message::DeleteItem(item_id))
+        .style(button::text)
+        .padding([4, 6]);
 
-        container(col)
+        let item_row = row![drag_handle, content_btn, delete_btn]
+            .spacing(0)
+            .align_y(iced::Alignment::Center);
+
+        let is_being_dragged = self.dragging_item_id == Some(item_id);
+
+        container(item_row)
             .width(Length::Fill)
-            .style(|_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.14, 0.14, 0.16))),
+            .style(move |_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(if is_being_dragged {
+                    Color::from_rgb(0.2, 0.2, 0.28)
+                } else {
+                    Color::from_rgb(0.14, 0.14, 0.16)
+                })),
                 border: iced::Border {
-                    color: Color::from_rgb(0.2, 0.2, 0.22),
+                    color: if is_being_dragged {
+                        Color::from_rgb(0.3, 0.5, 0.8)
+                    } else {
+                        Color::from_rgb(0.2, 0.2, 0.22)
+                    },
                     width: 1.0,
                     radius: 4.0.into(),
                 },
@@ -1161,34 +1200,6 @@ impl Jubako {
 
     fn view_dialog(&self, dialog: &Dialog) -> Element<'_, Message> {
         match dialog {
-            Dialog::RenameItem {
-                item_id: _,
-                current_label,
-            } => column![
-                text("Rename Item").size(16),
-                Space::new(Length::Fill, 8),
-                text_input("Enter label...", current_label)
-                    .on_input(Message::DialogInputChanged)
-                    .on_submit(Message::RenameItem)
-                    .padding(8)
-                    .size(14),
-                Space::new(Length::Fill, 12),
-                row![
-                    horizontal_space(),
-                    button(text("Cancel").size(13))
-                        .on_press(Message::CloseDialog)
-                        .style(button::secondary)
-                        .padding([6, 16]),
-                    button(text("Save").size(13))
-                        .on_press(Message::RenameItem)
-                        .style(button::primary)
-                        .padding([6, 16]),
-                ]
-                .spacing(8),
-            ]
-            .spacing(4)
-            .into(),
-
             Dialog::RenameFolder {
                 folder_id: _,
                 current_name,
@@ -1248,56 +1259,6 @@ impl Jubako {
                 .spacing(4)
                 .into()
             }
-
-            Dialog::MoveToFolder { item_id } => {
-                let item_id = *item_id;
-
-                let mut folder_list = Column::new().spacing(4);
-
-                // Option to move back to History (no folder)
-                folder_list = folder_list.push(
-                    button(
-                        text("\u{1F4CB} History (no folder)")
-                            .size(13)
-                            .shaping(text::Shaping::Advanced),
-                    )
-                    .on_press(Message::MoveItemToFolder(item_id, None))
-                    .style(button::text)
-                    .width(Length::Fill),
-                );
-
-                for folder in &self.folders {
-                    let indent = if folder.parent_id.is_some() {
-                        "    "
-                    } else {
-                        ""
-                    };
-                    let label = format!("{}\u{1F4C1} {}", indent, folder.name);
-                    folder_list = folder_list.push(
-                        button(text(label).size(13).shaping(text::Shaping::Advanced))
-                            .on_press(Message::MoveItemToFolder(item_id, Some(folder.id)))
-                            .style(button::text)
-                            .width(Length::Fill),
-                    );
-                }
-
-                column![
-                    text("Move to Folder").size(16),
-                    Space::new(Length::Fill, 8),
-                    scrollable(folder_list).height(Length::Fixed(300.0)),
-                    Space::new(Length::Fill, 12),
-                    row![
-                        horizontal_space(),
-                        button(text("Cancel").size(13))
-                            .on_press(Message::CloseDialog)
-                            .style(button::secondary)
-                            .padding([6, 16]),
-                    ]
-                    .spacing(8),
-                ]
-                .spacing(4)
-                .into()
-            }
         }
     }
 
@@ -1330,10 +1291,13 @@ impl Jubako {
             })
         });
 
-        // 3) Window event subscription for focus loss
+        // 3) Window event subscription for focus loss + global mouse release for D&D cancel
         let focus_sub = event::listen_with(|event, _status, _id| match event {
             Event::Window(window::Event::Unfocused) => Some(Message::WindowFocusLost),
             Event::Window(window::Event::CloseRequested) => Some(Message::HideWindow),
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                Some(Message::CancelDrag)
+            }
             _ => None,
         });
 
