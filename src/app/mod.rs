@@ -198,39 +198,56 @@ impl Jubako {
 
         let cursor_pos = platform::get_cursor_position();
         let monitor_rect = platform::get_monitor_rect_at_cursor();
+        let target_monitor_scale = platform::get_monitor_scale_factor_at_cursor()
+            .filter(|scale| *scale > 0.0)
+            .unwrap_or(1.0);
 
         window::get_latest().and_then(move |id| {
-            let mut tasks: Vec<Task<Message>> = Vec::new();
+            window::get_scale_factor(id).then(move |window_scale| {
+                let mut tasks: Vec<Task<Message>> = Vec::new();
 
-            if let Some(pos) = cursor_pos {
-                let adjusted = if let Some((origin, size)) = monitor_rect {
-                    let mid_x = origin.x + size.width / 2.0;
-                    let mid_y = origin.y + size.height / 2.0;
+                if let Some(pos) = cursor_pos {
+                    let adjusted_physical = if let Some((origin, size)) = monitor_rect {
+                        let mid_x = origin.x + size.width / 2.0;
+                        let mid_y = origin.y + size.height / 2.0;
+                        let window_width_physical = WINDOW_WIDTH * target_monitor_scale;
+                        let window_height_physical = WINDOW_HEIGHT * target_monitor_scale;
 
-                    let x = if pos.x >= mid_x {
-                        pos.x - WINDOW_WIDTH
+                        let x = if pos.x >= mid_x {
+                            pos.x - window_width_physical
+                        } else {
+                            pos.x
+                        };
+
+                        let y = if pos.y >= mid_y {
+                            pos.y - window_height_physical
+                        } else {
+                            pos.y
+                        };
+
+                        Point::new(x, y)
                     } else {
-                        pos.x
+                        pos
                     };
 
-                    let y = if pos.y >= mid_y {
-                        pos.y - WINDOW_HEIGHT
+                    let move_scale = if window_scale > 0.0 {
+                        window_scale
                     } else {
-                        pos.y
+                        1.0
                     };
+                    let adjusted_logical = Point::new(
+                        adjusted_physical.x / move_scale,
+                        adjusted_physical.y / move_scale,
+                    );
 
-                    Point::new(x, y)
-                } else {
-                    pos
-                };
+                    tasks.push(window::move_to(id, adjusted_logical));
+                }
 
-                tasks.push(window::move_to(id, adjusted));
-            }
+                tasks.push(window::change_mode(id, window::Mode::Windowed));
+                tasks.push(window::gain_focus(id));
 
-            tasks.push(window::change_mode(id, window::Mode::Windowed));
-            tasks.push(window::gain_focus(id));
-
-            Task::batch(tasks)
+                Task::batch(tasks)
+            })
         })
     }
 
