@@ -309,18 +309,8 @@ impl Jubako {
         let favorite_icon = if item.is_favorite { "\u{2605}" } else { "" };
 
         let press_message = if is_image {
-            if let Some(blob) = &item.content_blob {
-                if let Some((width, height)) =
-                    clipboard::parse_image_description(&item.content_data)
-                {
-                    Message::PasteImageItem {
-                        width,
-                        height,
-                        rgba: blob.clone(),
-                    }
-                } else {
-                    Message::Noop
-                }
+            if clipboard::parse_image_description(&item.content_data).is_some() {
+                Message::PasteImageItem(item.id)
             } else {
                 Message::Noop
             }
@@ -342,11 +332,10 @@ impl Jubako {
 
             let mut content = Column::new().spacing(2);
 
-            if let (Some(blob), Some((width, height))) = (&item.content_blob, dimensions) {
-                let handle = image::Handle::from_rgba(width as u32, height as u32, blob.clone());
+            if let (Some(_), Some(handle)) = (dimensions, self.image_handle_cache.get(&item.id)) {
                 content = content.push(
                     container(
-                        image(handle)
+                        image(handle.clone())
                             .content_fit(iced::ContentFit::ScaleDown)
                             .width(Length::Fixed(120.0))
                             .height(Length::Fixed(80.0)),

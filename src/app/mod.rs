@@ -4,7 +4,9 @@ use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyManager, HotKeyState,
 };
+use iced::widget::image;
 use iced::{event, mouse, window, Event, Point, Size, Subscription, Task, Theme};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -37,16 +39,12 @@ enum Dialog {
 enum Message {
     SearchInputChanged(String),
     SelectView(ViewMode),
-    Tick,
+    ClipboardUpdated,
     ToggleWindow,
     HideWindow,
     WindowFocusLost,
     PasteItem(String),
-    PasteImageItem {
-        width: usize,
-        height: usize,
-        rgba: Vec<u8>,
-    },
+    PasteImageItem(i64),
     DeleteItem(i64),
     StartDragItem(i64),
     DragOverFolder(i64),
@@ -84,6 +82,7 @@ struct Jubako {
     expanded_folder_actions: Option<i64>,
     dragging_item_id: Option<i64>,
     drag_over_folder: Option<Option<i64>>,
+    image_handle_cache: HashMap<i64, image::Handle>,
 }
 
 pub fn run() -> iced::Result {
@@ -137,6 +136,7 @@ impl Jubako {
             expanded_folder_actions: None,
             dragging_item_id: None,
             drag_over_folder: None,
+            image_handle_cache: HashMap::new(),
         };
 
         if let Err(error) = app.db.clear_history() {
@@ -173,6 +173,45 @@ impl Jubako {
                 self.db.get_items_in_folder(*folder_id).unwrap_or_default()
             }
         };
+        self.refresh_image_thumbnail_cache();
+    }
+
+    fn refresh_image_thumbnail_cache(&mut self) {
+        const THUMBNAIL_CACHE_SIZE: usize = 12;
+
+        let candidate_ids: Vec<i64> = self
+            .items
+            .iter()
+            .filter(|item| item.content_type == "image")
+            .take(THUMBNAIL_CACHE_SIZE)
+            .map(|item| item.id)
+            .collect();
+        let keep: HashSet<i64> = candidate_ids.iter().copied().collect();
+
+        self.image_handle_cache
+            .retain(|item_id, _| keep.contains(item_id));
+
+        for item_id in candidate_ids {
+            if self.image_handle_cache.contains_key(&item_id) {
+                continue;
+            }
+
+            let Some(item) = self.items.iter().find(|item| item.id == item_id) else {
+                continue;
+            };
+            let Some((width, height)) = clipboard::parse_image_description(&item.content_data)
+            else {
+                continue;
+            };
+            let Ok(Some(blob)) = self.db.get_item_blob(item_id) else {
+                continue;
+            };
+
+            self.image_handle_cache.insert(
+                item_id,
+                image::Handle::from_rgba(width as u32, height as u32, blob),
+            );
+        }
     }
 
     fn refresh_data(&mut self) {
@@ -259,8 +298,6 @@ impl Jubako {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let tick = iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick);
-
         let hotkey_sub = Subscription::run(|| {
             iced::futures::stream::unfold((), |_| async {
                 let result = tokio::task::spawn_blocking(|| {
@@ -281,6 +318,22 @@ impl Jubako {
             })
         });
 
+        let clipboard_sub = Subscription::run(|| {
+            iced::futures::stream::unfold((), |_| async {
+                let updated = tokio::task::spawn_blocking(|| {
+                    platform::wait_for_clipboard_update(Duration::from_secs(1))
+                })
+                .await
+                .unwrap_or(false);
+
+                if updated {
+                    Some((Message::ClipboardUpdated, ()))
+                } else {
+                    Some((Message::Noop, ()))
+                }
+            })
+        });
+
         let focus_sub = event::listen_with(|event, _status, _id| match event {
             Event::Window(window::Event::Unfocused) => Some(Message::WindowFocusLost),
             Event::Window(window::Event::CloseRequested) => Some(Message::HideWindow),
@@ -290,6 +343,6 @@ impl Jubako {
             _ => None,
         });
 
-        Subscription::batch(vec![tick, hotkey_sub, focus_sub])
+        Subscription::batch(vec![hotkey_sub, clipboard_sub, focus_sub])
     }
 }

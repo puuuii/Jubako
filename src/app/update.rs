@@ -8,16 +8,12 @@ impl Jubako {
             Message::Noop => Task::none(),
             Message::SearchInputChanged(query) => self.handle_search_input_changed(query),
             Message::SelectView(view) => self.handle_select_view(view),
-            Message::Tick => self.handle_tick(),
+            Message::ClipboardUpdated => self.handle_clipboard_updated(),
             Message::ToggleWindow => self.handle_toggle_window(),
             Message::HideWindow => self.hide_window(),
             Message::WindowFocusLost => self.handle_window_focus_lost(),
             Message::PasteItem(content) => clipboard::set_text_and_simulate_paste(self, content),
-            Message::PasteImageItem {
-                width,
-                height,
-                rgba,
-            } => clipboard::set_image_and_simulate_paste(self, width, height, rgba),
+            Message::PasteImageItem(item_id) => self.handle_paste_image_item(item_id),
             Message::DeleteItem(id) => self.handle_delete_item(id),
             Message::StartDragItem(id) => self.handle_start_drag_item(id),
             Message::DragOverFolder(folder_id) => self.handle_drag_over_folder(folder_id),
@@ -44,6 +40,7 @@ impl Jubako {
         if !query.is_empty() {
             if let Ok(results) = self.db.search_items(&query, 200) {
                 self.items = results;
+                self.refresh_image_thumbnail_cache();
             }
         } else {
             self.load_items();
@@ -60,12 +57,26 @@ impl Jubako {
         Task::none()
     }
 
-    fn handle_tick(&mut self) -> Task<Message> {
+    fn handle_clipboard_updated(&mut self) -> Task<Message> {
         if clipboard::poll_clipboard(self) {
             self.load_items();
         }
 
         Task::none()
+    }
+
+    fn handle_paste_image_item(&mut self, item_id: i64) -> Task<Message> {
+        let Some(item) = self.items.iter().find(|item| item.id == item_id) else {
+            return Task::none();
+        };
+        let Some((width, height)) = clipboard::parse_image_description(&item.content_data) else {
+            return Task::none();
+        };
+        let Ok(Some(blob)) = self.db.get_item_blob(item_id) else {
+            return Task::none();
+        };
+
+        clipboard::set_image_and_simulate_paste(self, width, height, blob)
     }
 
     fn handle_toggle_window(&mut self) -> Task<Message> {

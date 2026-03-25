@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS items (
 const ADD_CONTENT_BLOB_MIGRATION_SQL: &str = "ALTER TABLE items ADD COLUMN content_blob BLOB";
 
 const SELECT_ITEM_COLUMNS: &str = "
-SELECT id, folder_id, content_type, content_data, label, created_at, is_favorite, content_blob
+SELECT id, folder_id, content_type, content_data, label, created_at, is_favorite
 FROM items
 ";
 
@@ -49,7 +49,6 @@ pub struct Item {
     pub label: Option<String>,
     pub created_at: DateTime<Utc>,
     pub is_favorite: bool,
-    pub content_blob: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for Db {
@@ -190,6 +189,17 @@ impl Db {
         }
     }
 
+    pub fn get_item_blob(&self, item_id: i64) -> Result<Option<Vec<u8>>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT content_blob FROM items WHERE id = ?1 LIMIT 1")?;
+        let mut rows = stmt.query(params![item_id])?;
+
+        match rows.next()? {
+            Some(row) => row.get(0),
+            None => Ok(None),
+        }
+    }
+
     pub fn get_folders(&self) -> Result<Vec<Folder>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -265,7 +275,6 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         label: row.get(4)?,
         created_at: parse_datetime(&row.get::<_, String>(5)?),
         is_favorite: row.get::<_, i64>(6)? != 0,
-        content_blob: row.get(7)?,
     })
 }
 
