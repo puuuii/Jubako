@@ -2,6 +2,10 @@ use iced::{Point, Size};
 
 #[cfg(target_os = "windows")]
 pub(super) fn ensure_startup_registration() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+
     if std::env::args().any(|arg| arg == "--no-autostart") {
         return;
     }
