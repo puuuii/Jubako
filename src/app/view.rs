@@ -38,29 +38,27 @@ impl Jubako {
         .spacing(0)
         .height(Length::Fill);
 
-        let layout: Element<'_, Message> = column![search, body].spacing(0).height(Length::Fill).into();
+        let layout: Element<'_, Message> =
+            column![search, body].spacing(0).height(Length::Fill).into();
 
         if let Some(dialog) = &self.dialog {
             let dialog_content = self.view_dialog(dialog);
             container(
                 column![
                     Space::new(Length::Fill, Length::FillPortion(1)),
-                    container(
-                        container(dialog_content)
-                            .padding(20)
-                            .max_width(450)
-                            .style(|_theme: &Theme| container::Style {
-                                background: Some(iced::Background::Color(Color::from_rgb(
-                                    0.15, 0.15, 0.18,
-                                ))),
-                                border: iced::Border {
-                                    color: Color::from_rgb(0.4, 0.4, 0.5),
-                                    width: 2.0,
-                                    radius: 8.0.into(),
-                                },
-                                ..container::Style::default()
-                            })
-                    )
+                    container(container(dialog_content).padding(20).max_width(450).style(
+                        |_theme: &Theme| container::Style {
+                            background: Some(iced::Background::Color(Color::from_rgb(
+                                0.15, 0.15, 0.18,
+                            ))),
+                            border: iced::Border {
+                                color: Color::from_rgb(0.4, 0.4, 0.5),
+                                width: 2.0,
+                                radius: 8.0.into(),
+                            },
+                            ..container::Style::default()
+                        }
+                    ))
                     .width(Length::Fill)
                     .center_x(Length::Fill),
                     Space::new(Length::Fill, Length::FillPortion(1)),
@@ -70,7 +68,9 @@ impl Jubako {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.5))),
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    0.0, 0.0, 0.0, 0.5,
+                ))),
                 ..container::Style::default()
             })
             .into()
@@ -145,7 +145,11 @@ impl Jubako {
             )
             .push(Space::new(Length::Fill, 4));
 
-        for folder in self.folders.iter().filter(|folder| folder.parent_id.is_none()) {
+        for folder in self
+            .folders
+            .iter()
+            .filter(|folder| folder.parent_id.is_none())
+        {
             column = column.push(self.view_folder_tree(folder, 0));
         }
 
@@ -275,9 +279,13 @@ impl Jubako {
 
         if items.is_empty() {
             items_column = items_column.push(
-                container(text("No items").size(14).color(Color::from_rgb(0.5, 0.5, 0.5)))
-                    .padding(20)
-                    .center_x(Length::Fill),
+                container(
+                    text("No items")
+                        .size(14)
+                        .color(Color::from_rgb(0.5, 0.5, 0.5)),
+                )
+                .padding(20)
+                .center_x(Length::Fill),
             );
         } else {
             for item in items {
@@ -285,10 +293,14 @@ impl Jubako {
             }
         }
 
-        column![header, horizontal_rule(1), scrollable(items_column).height(Length::Fill)]
-            .spacing(0)
-            .height(Length::Fill)
-            .into()
+        column![
+            header,
+            horizontal_rule(1),
+            scrollable(items_column).height(Length::Fill)
+        ]
+        .spacing(0)
+        .height(Length::Fill)
+        .into()
     }
 
     fn view_item(&self, item: &Item) -> Element<'_, Message> {
@@ -298,7 +310,9 @@ impl Jubako {
 
         let press_message = if is_image {
             if let Some(blob) = &item.content_blob {
-                if let Some((width, height)) = clipboard::parse_image_description(&item.content_data) {
+                if let Some((width, height)) =
+                    clipboard::parse_image_description(&item.content_data)
+                {
                     Message::PasteImageItem {
                         width,
                         height,

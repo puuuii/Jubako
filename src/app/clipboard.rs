@@ -72,7 +72,8 @@ pub(super) fn poll_clipboard(app: &mut Jubako) -> bool {
                     match app.db.check_image_duplicate(&description) {
                         Ok(Some(_)) => {}
                         _ => {
-                            if let Err(error) = app.db.insert_image_item(&description, &image.bytes) {
+                            if let Err(error) = app.db.insert_image_item(&description, &image.bytes)
+                            {
                                 eprintln!("Failed to save image item: {}", error);
                             }
                         }

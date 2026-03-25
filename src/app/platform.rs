@@ -1,6 +1,51 @@
 use iced::{Point, Size};
 
 #[cfg(target_os = "windows")]
+pub(super) fn ensure_startup_registration() {
+    if std::env::args().any(|arg| arg == "--no-autostart") {
+        return;
+    }
+
+    if let Err(error) = ensure_startup_registration_inner() {
+        eprintln!("Failed to configure startup registration: {error}");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn ensure_startup_registration() {}
+
+#[cfg(target_os = "windows")]
+fn ensure_startup_registration_inner() -> anyhow::Result<()> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const APP_NAME: &str = "Jubako";
+
+    let command = startup_command_string()?;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (run_key, _) = hkcu.create_subkey(RUN_KEY)?;
+    let current: Option<String> = run_key.get_value(APP_NAME).ok();
+
+    if current.as_deref() != Some(command.as_str()) {
+        run_key.set_value(APP_NAME, &command)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn startup_command_string() -> anyhow::Result<String> {
+    let exe = std::env::current_exe()?;
+    let exe = exe
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Executable path contains non-UTF8 characters"))?;
+
+    Ok(format!("\"{exe}\" --background"))
+}
+
+#[cfg(target_os = "windows")]
 pub(super) fn get_cursor_position() -> Option<Point> {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
@@ -44,7 +89,10 @@ pub(super) fn get_monitor_rect_at_cursor() -> Option<(Point, Size)> {
             let rect = monitor_info.rcMonitor;
             Some((
                 Point::new(rect.left as f32, rect.top as f32),
-                Size::new((rect.right - rect.left) as f32, (rect.bottom - rect.top) as f32),
+                Size::new(
+                    (rect.right - rect.left) as f32,
+                    (rect.bottom - rect.top) as f32,
+                ),
             ))
         } else {
             None

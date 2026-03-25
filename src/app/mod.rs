@@ -87,6 +87,8 @@ struct Jubako {
 }
 
 pub fn run() -> iced::Result {
+    platform::ensure_startup_registration();
+
     iced::application("Jubako", Jubako::update, Jubako::view)
         .subscription(Jubako::subscription)
         .theme(|_| Theme::Dark)
@@ -163,7 +165,9 @@ impl Jubako {
     fn load_items(&mut self) {
         self.items = match &self.current_view {
             ViewMode::History => self.db.get_history(200).unwrap_or_default(),
-            ViewMode::Folder(folder_id) => self.db.get_items_in_folder(*folder_id).unwrap_or_default(),
+            ViewMode::Folder(folder_id) => {
+                self.db.get_items_in_folder(*folder_id).unwrap_or_default()
+            }
         };
     }
 
@@ -238,9 +242,10 @@ impl Jubako {
 
         let hotkey_sub = Subscription::run(|| {
             iced::futures::stream::unfold((), |_| async {
-                let result =
-                    tokio::task::spawn_blocking(|| global_hotkey::GlobalHotKeyEvent::receiver().recv())
-                        .await;
+                let result = tokio::task::spawn_blocking(|| {
+                    global_hotkey::GlobalHotKeyEvent::receiver().recv()
+                })
+                .await;
 
                 match result {
                     Ok(Ok(event)) if event.state == HotKeyState::Pressed => {
