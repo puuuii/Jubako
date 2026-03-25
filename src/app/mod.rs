@@ -139,6 +139,10 @@ impl Jubako {
             drag_over_folder: None,
         };
 
+        if let Err(error) = app.db.clear_history() {
+            eprintln!("Failed to reset history on startup: {}", error);
+        }
+
         app.load_folders();
         clipboard::capture_initial_clipboard(&mut app);
         app.load_items();

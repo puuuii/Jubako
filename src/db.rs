@@ -100,6 +100,12 @@ impl Db {
         rows.collect()
     }
 
+    pub fn clear_history(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM items WHERE folder_id IS NULL", [])?;
+        Ok(())
+    }
+
     pub fn get_items_in_folder(&self, folder_id: i64) -> Result<Vec<Item>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
