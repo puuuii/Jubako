@@ -37,7 +37,6 @@ enum Dialog {
 
 #[derive(Debug, Clone)]
 enum Message {
-    SearchInputChanged(String),
     SelectView(ViewMode),
     ClipboardUpdated,
     ToggleWindow,
@@ -71,7 +70,6 @@ struct Jubako {
     current_view: ViewMode,
     items: Vec<Item>,
     folders: Vec<Folder>,
-    search_query: String,
     #[allow(dead_code)]
     hotkey_manager: GlobalHotKeyManager,
     #[allow(dead_code)]
@@ -127,7 +125,6 @@ impl Jubako {
             current_view: ViewMode::History,
             items: Vec::new(),
             folders: Vec::new(),
-            search_query: String::new(),
             hotkey_manager: manager,
             hotkey_id,
             is_visible: false,
@@ -231,7 +228,6 @@ impl Jubako {
         const WINDOW_HEIGHT: f32 = 540.0;
 
         self.is_visible = true;
-        self.search_query.clear();
         self.reset_transient_state();
         self.refresh_data();
 

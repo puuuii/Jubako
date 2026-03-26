@@ -131,19 +131,6 @@ impl Db {
         Ok(())
     }
 
-    pub fn search_items(&self, query: &str, limit: usize) -> Result<Vec<Item>> {
-        let conn = self.conn.lock().unwrap();
-        let pattern = format!("%{}%", query);
-        let mut stmt = conn.prepare(&format!(
-            "{SELECT_ITEM_COLUMNS}
-             WHERE content_data LIKE ?1 OR label LIKE ?1
-             ORDER BY created_at DESC
-             LIMIT ?2"
-        ))?;
-        let rows = stmt.query_map(params![pattern, limit as i64], row_to_item)?;
-        rows.collect()
-    }
-
     pub fn check_duplicate(&self, content: &str) -> Result<Option<i64>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

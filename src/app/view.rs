@@ -10,15 +10,6 @@ use super::{clipboard, Dialog, Jubako, Message, ViewMode};
 
 impl Jubako {
     pub(super) fn view(&self) -> Element<'_, Message> {
-        let search = container(
-            text_input("Search items...", &self.search_query)
-                .on_input(Message::SearchInputChanged)
-                .padding(8)
-                .size(16),
-        )
-        .padding(8)
-        .width(Length::Fill);
-
         let body = row![
             container(self.view_sidebar())
                 .width(Length::FillPortion(1))
@@ -38,8 +29,7 @@ impl Jubako {
         .spacing(0)
         .height(Length::Fill);
 
-        let layout: Element<'_, Message> =
-            column![search, body].spacing(0).height(Length::Fill).into();
+        let layout: Element<'_, Message> = column![body].spacing(0).height(Length::Fill).into();
 
         if let Some(dialog) = &self.dialog {
             let dialog_content = self.view_dialog(dialog);
@@ -522,22 +512,7 @@ impl Jubako {
     }
 
     fn displayed_items(&self) -> Vec<&Item> {
-        if self.search_query.is_empty() {
-            self.items.iter().collect()
-        } else {
-            let query = self.search_query.to_lowercase();
-            self.items
-                .iter()
-                .filter(|item| {
-                    item.content_data.to_lowercase().contains(&query)
-                        || item
-                            .label
-                            .as_ref()
-                            .map(|label| label.to_lowercase().contains(&query))
-                            .unwrap_or(false)
-                })
-                .collect()
-        }
+        self.items.iter().collect()
     }
 }
 

@@ -56,7 +56,7 @@ pub(super) fn poll_clipboard(app: &mut Jubako) -> bool {
                     }
                 }
 
-                if app.current_view == ViewMode::History && app.search_query.is_empty() {
+                if app.current_view == ViewMode::History {
                     should_refresh = true;
                 }
             }
@@ -79,7 +79,7 @@ pub(super) fn poll_clipboard(app: &mut Jubako) -> bool {
                         }
                     }
 
-                    if app.current_view == ViewMode::History && app.search_query.is_empty() {
+                    if app.current_view == ViewMode::History {
                         should_refresh = true;
                     }
                 }

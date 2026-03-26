@@ -6,7 +6,6 @@ impl Jubako {
     pub(super) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Noop => Task::none(),
-            Message::SearchInputChanged(query) => self.handle_search_input_changed(query),
             Message::SelectView(view) => self.handle_select_view(view),
             Message::ClipboardUpdated => self.handle_clipboard_updated(),
             Message::ToggleWindow => self.handle_toggle_window(),
@@ -34,24 +33,8 @@ impl Jubako {
         }
     }
 
-    fn handle_search_input_changed(&mut self, query: String) -> Task<Message> {
-        self.search_query = query.clone();
-
-        if !query.is_empty() {
-            if let Ok(results) = self.db.search_items(&query, 200) {
-                self.items = results;
-                self.refresh_image_thumbnail_cache();
-            }
-        } else {
-            self.load_items();
-        }
-
-        Task::none()
-    }
-
     fn handle_select_view(&mut self, view: ViewMode) -> Task<Message> {
         self.current_view = view;
-        self.search_query.clear();
         self.expanded_folder_actions = None;
         self.load_items();
         Task::none()
