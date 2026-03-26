@@ -1,5 +1,5 @@
 use anyhow::Context;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use directories::ProjectDirs;
 use rusqlite::{params, Connection, Result};
 use std::sync::Mutex;
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS items (
 const ADD_CONTENT_BLOB_MIGRATION_SQL: &str = "ALTER TABLE items ADD COLUMN content_blob BLOB";
 
 const SELECT_ITEM_COLUMNS: &str = "
-SELECT id, folder_id, content_type, content_data, label, created_at, is_favorite
+SELECT id, folder_id, content_type, content_data, label, is_favorite
 FROM items
 ";
 
@@ -47,7 +47,6 @@ pub struct Item {
     pub content_type: String,
     pub content_data: String,
     pub label: Option<String>,
-    pub created_at: DateTime<Utc>,
     pub is_favorite: bool,
 }
 
@@ -248,20 +247,13 @@ fn run_migrations(conn: &Connection) {
     let _ = conn.execute_batch(ADD_CONTENT_BLOB_MIGRATION_SQL);
 }
 
-fn parse_datetime(value: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|date_time| date_time.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
-}
-
 fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
     Ok(Item {
         id: row.get(0)?,
         content_type: row.get(2)?,
         content_data: row.get(3)?,
         label: row.get(4)?,
-        created_at: parse_datetime(&row.get::<_, String>(5)?),
-        is_favorite: row.get::<_, i64>(6)? != 0,
+        is_favorite: row.get::<_, i64>(5)? != 0,
     })
 }
 

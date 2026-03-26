@@ -301,7 +301,6 @@ impl Jubako {
 
     fn view_item(&self, item: &Item) -> Element<'_, Message> {
         let is_image = item.content_type == "image";
-        let timestamp = item.created_at.format("%m/%d %H:%M").to_string();
         let favorite_icon = if item.is_favorite { "\u{2605}" } else { "" };
 
         let press_message = if is_image {
@@ -354,12 +353,6 @@ impl Jubako {
                 .spacing(4),
             );
 
-            content = content.push(
-                text(timestamp)
-                    .size(10)
-                    .color(Color::from_rgb(0.5, 0.5, 0.5)),
-            );
-
             button(content)
                 .on_press(press_message)
                 .style(button::text)
@@ -386,9 +379,6 @@ impl Jubako {
                             .color(Color::from_rgb(1.0, 0.85, 0.0)),
                     ]
                     .spacing(4),
-                    text(timestamp)
-                        .size(10)
-                        .color(Color::from_rgb(0.5, 0.5, 0.5)),
                 ]
                 .spacing(2),
             )
