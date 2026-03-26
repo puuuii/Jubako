@@ -92,7 +92,7 @@ pub fn run() -> iced::Result {
         .subscription(Jubako::subscription)
         .theme(|_| Theme::Dark)
         .window(window::Settings {
-            size: Size::new(750.0, 500.0),
+            size: Size::new(540.0, 540.0),
             position: window::Position::Centered,
             visible: false,
             decorations: false,
@@ -227,8 +227,8 @@ impl Jubako {
     }
 
     fn show_window(&mut self) -> Task<Message> {
-        const WINDOW_WIDTH: f32 = 750.0;
-        const WINDOW_HEIGHT: f32 = 500.0;
+        const WINDOW_WIDTH: f32 = 540.0;
+        const WINDOW_HEIGHT: f32 = 540.0;
 
         self.is_visible = true;
         self.search_query.clear();
