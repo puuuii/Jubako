@@ -196,11 +196,8 @@ impl Jubako {
 
     fn handle_dialog_input_changed(&mut self, value: String) -> Task<Message> {
         match &mut self.dialog {
-            Some(Dialog::RenameFolder {
-                ref mut current_name,
-                ..
-            }) => *current_name = value,
-            Some(Dialog::NewFolder { ref mut name, .. }) => *name = value,
+            Some(Dialog::RenameFolder { current_name, .. }) => *current_name = value,
+            Some(Dialog::NewFolder { name, .. }) => *name = value,
             _ => {}
         }
 
