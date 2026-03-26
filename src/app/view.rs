@@ -118,21 +118,27 @@ impl Jubako {
             history_button.into()
         };
 
+        let new_folder_button = button(
+            text("\u{2795}")
+                .shaping(text::Shaping::Advanced)
+                .size(14)
+                .color(Color::from_rgb(0.5, 0.8, 0.5)),
+        )
+        .on_press(Message::OpenNewFolder(None))
+        .style(button::text)
+        .padding([4, 8]);
+
+        let history_row = Row::new()
+            .spacing(4)
+            .align_y(iced::Alignment::Center)
+            .push(container(history_entry).width(Length::Fill))
+            .push(new_folder_button);
+
         let mut column = Column::new()
             .spacing(2)
             .padding(8)
-            .push(history_entry)
+            .push(history_row)
             .push(horizontal_rule(1))
-            .push(
-                button(
-                    text("+ New Folder")
-                        .size(12)
-                        .color(Color::from_rgb(0.5, 0.8, 0.5)),
-                )
-                .on_press(Message::OpenNewFolder(None))
-                .style(button::text)
-                .width(Length::Fill),
-            )
             .push(Space::new(Length::Fill, 4));
 
         for folder in self
