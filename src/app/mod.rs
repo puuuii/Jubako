@@ -90,7 +90,7 @@ pub fn run() -> iced::Result {
         .subscription(Jubako::subscription)
         .theme(|_| Theme::Dark)
         .window(window::Settings {
-            size: Size::new(540.0, 540.0),
+            size: Size::new(640.0, 520.0),
             position: window::Position::Centered,
             visible: false,
             decorations: false,
@@ -224,8 +224,8 @@ impl Jubako {
     }
 
     fn show_window(&mut self) -> Task<Message> {
-        const WINDOW_WIDTH: f32 = 540.0;
-        const WINDOW_HEIGHT: f32 = 540.0;
+        const WINDOW_WIDTH: f32 = 640.0;
+        const WINDOW_HEIGHT: f32 = 520.0;
 
         self.is_visible = true;
         self.reset_transient_state();
