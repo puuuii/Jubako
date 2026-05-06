@@ -111,8 +111,12 @@ fn spawn_detached_background_process() -> std::io::Result<()> {
 }
 
 fn main() -> iced::Result {
+    println!("DEBUG: Starting application...");
     #[cfg(target_os = "windows")]
     run_detached_if_needed();
 
-    app::run()
+    println!("DEBUG: calling app::run()");
+    let res = app::run();
+    println!("DEBUG: app::run() finished, result: {:?}", res);
+    res
 }

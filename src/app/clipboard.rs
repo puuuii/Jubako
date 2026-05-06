@@ -1,5 +1,4 @@
 use arboard::ImageData;
-use enigo::{Direction, Key, Keyboard};
 use iced::{window, Task};
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
@@ -133,22 +132,45 @@ pub(super) fn parse_image_description(description: &str) -> Option<(usize, usize
     Some((width, height))
 }
 
-fn simulate_paste(app: &Jubako) -> Task<Message> {
-    let enigo = app.enigo.clone();
+fn simulate_paste(_app: &Jubako) -> Task<Message> {
+    println!("DEBUG: simulate_paste called");
 
-    window::get_latest()
-        .and_then(move |id| window::change_mode::<Message>(id, window::Mode::Hidden))
-        .chain(Task::perform(
-            async move {
-                tokio::time::sleep(Duration::from_millis(150)).await;
-                if let Ok(mut enigo) = enigo.lock() {
-                    let _ = enigo.key(Key::Control, Direction::Press);
-                    let _ = enigo.key(Key::Unicode('v'), Direction::Click);
-                    let _ = enigo.key(Key::Control, Direction::Release);
-                }
-            },
-            |_| Message::Noop,
-        ))
+    // ウィンドウを隠すタスク
+    let hide_task = window::get_latest().and_then(|id| {
+        window::change_mode::<Message>(id, window::Mode::Hidden)
+    });
+
+    let paste_task = Task::perform(
+        async move {
+            println!("DEBUG: waiting before paste");
+            // 少し長めに待機して、フォーカスが戻るのを確実に待つ
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            println!("DEBUG: simulating paste (fallback to Enigo)");
+
+            // Enigo の利用を復活させるが、非同期処理の外で確実に実行
+            #[cfg(target_os = "macos")]
+            {
+                // アクティブなアプリを特定してフォーカスを戻し、ペーストを送る最も確実な AppleScript
+                let script = r#"
+                    tell application "System Events"
+                        set activeApp to (first process whose frontmost is true)
+                        -- 一度他のアプリに戻るように明示的に命令を出す（もしJubakoなら直前のアプリへ）
+                        key code 48 using {command down} -- Command + Tab 相当を送り、フォーカスを強制的に切り替える
+                        delay 0.5
+                        keystroke "v" using command down
+                    end tell
+                "#;
+                let _ = std::process::Command::new("osascript")
+                    .arg("-e")
+                    .arg(script)
+                    .status(); // status() で完了を待つ
+            }
+            println!("DEBUG: paste finished");
+        },
+        |_| Message::Noop,
+    );
+
+    Task::batch(vec![hide_task, paste_task])
 }
 
 fn hash_image_data(image: &ImageData<'_>) -> u64 {

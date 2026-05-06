@@ -307,20 +307,10 @@ pub(super) fn get_monitor_scale_factor_at_cursor() -> Option<f32> {
     None
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(target_os = "macos")]
 pub(super) fn apply_tool_window_style() {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
-    };
-
-    unsafe {
-        let window = GetForegroundWindow();
-        if !window.is_invalid() {
-            let style = GetWindowLongW(window, GWL_EXSTYLE);
-            SetWindowLongW(window, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW.0 as i32);
-        }
-    }
+    println!("DEBUG: apply_tool_window_style called on macos");
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub(super) fn apply_tool_window_style() {}
