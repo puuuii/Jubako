@@ -1,5 +1,5 @@
 use arboard::ImageData;
-use iced::{window, Task};
+use iced::{Task, window};
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -133,16 +133,14 @@ pub(super) fn parse_image_description(description: &str) -> Option<(usize, usize
 }
 
 fn simulate_paste(_app: &Jubako) -> Task<Message> {
-
     // ウィンドウを隠すタスク
-    let hide_task = window::get_latest().and_then(|id| {
-        window::change_mode::<Message>(id, window::Mode::Hidden)
-    });
+    let hide_task = window::get_latest()
+        .and_then(|id| window::change_mode::<Message>(id, window::Mode::Hidden));
 
     let paste_task = Task::perform(
         async move {
             // 少し長めに待機して、フォーカスが戻るのを確実に待つ
-            tokio::time::sleep(Duration::from_millis(800)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
 
             // Enigo の利用を復活させるが、非同期処理の外で確実に実行
             #[cfg(target_os = "macos")]
@@ -153,7 +151,6 @@ fn simulate_paste(_app: &Jubako) -> Task<Message> {
                         set activeApp to (first process whose frontmost is true)
                         -- 一度他のアプリに戻るように明示的に命令を出す（もしJubakoなら直前のアプリへ）
                         key code 48 using {command down} -- Command + Tab 相当を送り、フォーカスを強制的に切り替える
-                        delay 0.5
                         keystroke "v" using command down
                     end tell
                 "#;
