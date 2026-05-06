@@ -309,7 +309,6 @@ pub(super) fn get_monitor_scale_factor_at_cursor() -> Option<f32> {
 
 #[cfg(target_os = "macos")]
 pub(super) fn apply_tool_window_style() {
-    println!("DEBUG: apply_tool_window_style called on macos");
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]

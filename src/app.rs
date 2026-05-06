@@ -103,25 +103,20 @@ pub fn run() -> iced::Result {
 
 impl Jubako {
     fn new() -> (Self, Task<Message>) {
-        println!("DEBUG: Jubako::new() started");
         let db = Arc::new(Db::new().expect("Failed to initialize DB"));
-        println!("DEBUG: DB initialized");
         
         let clipboard = Arc::new(Mutex::new(
             Clipboard::new().expect("Failed to initialize clipboard"),
         ));
-        println!("DEBUG: Clipboard initialized");
 
         let manager = GlobalHotKeyManager::new().expect("Failed to init hotkey manager");
         let hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::ALT), Code::KeyV);
         let hotkey_id = hotkey.id();
         manager.register(hotkey).expect("Failed to register hotkey");
-        println!("DEBUG: Hotkeys registered");
 
         let enigo = Arc::new(Mutex::new(
             Enigo::new(&Settings::default()).expect("Failed to init enigo"),
         ));
-        println!("DEBUG: Enigo initialized");
 
         let mut app = Self {
             db,
@@ -159,8 +154,6 @@ impl Jubako {
                 Message::Noop
             },
         );
-        println!("DEBUG: Jubako initialized, returning task");
-        println!("DEBUG: App state: visible={:?}, items_len={}", app.is_visible, app.items.len());
 
         (app, task)
     }
