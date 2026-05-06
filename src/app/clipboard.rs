@@ -133,7 +133,6 @@ pub(super) fn parse_image_description(description: &str) -> Option<(usize, usize
 }
 
 fn simulate_paste(_app: &Jubako) -> Task<Message> {
-    println!("DEBUG: simulate_paste called");
 
     // ウィンドウを隠すタスク
     let hide_task = window::get_latest().and_then(|id| {
@@ -142,10 +141,8 @@ fn simulate_paste(_app: &Jubako) -> Task<Message> {
 
     let paste_task = Task::perform(
         async move {
-            println!("DEBUG: waiting before paste");
             // 少し長めに待機して、フォーカスが戻るのを確実に待つ
             tokio::time::sleep(Duration::from_millis(800)).await;
-            println!("DEBUG: simulating paste (fallback to Enigo)");
 
             // Enigo の利用を復活させるが、非同期処理の外で確実に実行
             #[cfg(target_os = "macos")]
@@ -165,7 +162,6 @@ fn simulate_paste(_app: &Jubako) -> Task<Message> {
                     .arg(script)
                     .status(); // status() で完了を待つ
             }
-            println!("DEBUG: paste finished");
         },
         |_| Message::Noop,
     );

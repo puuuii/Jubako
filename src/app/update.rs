@@ -12,11 +12,9 @@ impl Jubako {
             Message::HideWindow => self.hide_window(),
             Message::WindowFocusLost => self.handle_window_focus_lost(),
             Message::PasteItem(content) => {
-                println!("DEBUG: Message::PasteItem received, content length: {}", content.len());
                 clipboard::set_text_and_simulate_paste(self, content)
             },
             Message::PasteImageItem(item_id) => {
-                println!("DEBUG: Message::PasteImageItem received, item_id: {}", item_id);
                 self.handle_paste_image_item(item_id)
             },
             Message::DeleteItem(id) => self.handle_delete_item(id),
