@@ -20,7 +20,7 @@ stateDiagram-v2
     Dragging --> VisibleIdle: DropOnFolder / DropOnHistory / CancelDrag
 
     VisibleIdle --> Pasting: PasteItem / PasteImageItem
-    Pasting --> Hidden: ウィンドウ非表示 + Ctrl+V 擬似入力
+    Pasting --> Hidden: ウィンドウ非表示 + Ctrl+V / Cmd+V 擬似入力
 
     VisibleIdle --> VisibleIdle: ClipboardUpdated（再読込）
 ```
@@ -30,7 +30,7 @@ stateDiagram-v2
 | 遷移元 | イベント/コマンド | ガード条件 | 遷移先 | 副作用 |
 | --- | --- | --- | --- | --- |
 | `Hidden` | `ToggleWindow` | プロセスが実行中 | `VisibleIdle` | フォルダ/アイテム再読込、ウィンドウ移動とフォーカス |
-| `VisibleIdle` | `WindowFocusLost` または `HideWindow` | モーダルダイアログ未表示 | `Hidden` | ツールウィンドウ非表示、一時 UI 状態リセット |
+| `VisibleIdle` | `WindowFocusLost` または `HideWindow` | モーダルダイアログ未表示 | `Hidden` | ツールウィンドウ非表示（macOS は `NSApp.hide` 併用）、一時 UI 状態リセット |
 | `VisibleIdle` | `OpenNewFolder` / `OpenRenameFolder` | リネーム対象 ID が有効 | `DialogOpen` | ダイアログ表示と入力値保持 |
 | `DialogOpen` | `CreateFolder` / `RenameFolder` | 入力名が空でない | `VisibleIdle` | フォルダ変更を永続化し再読込 |
 | `VisibleIdle` | `StartDragItem` | 対象アイテムが一覧に存在 | `Dragging` | ドラッグ中アイテム ID とドロップ先ハイライト保持 |
@@ -50,4 +50,3 @@ stateDiagram-v2
 - ホットキーとフォーカスイベントは競合し得るため、最終表示状態はリデューサ処理順に依存します。
 - チャネル切断時はプロセス終了ではなくポーリング継続で縮退運転します。
 - 禁止遷移例は `StartDragItem` なしの `DropOnFolder`、リネームダイアログ未表示時の `RenameFolder` です。
-

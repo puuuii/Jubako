@@ -9,6 +9,7 @@
 - Jubako のバックグラウンドプロセスが動作中であること。
 - クリップボード監視とホットキー購読が有効であること。
 - SQLite データベースが初期化済みであること。
+- macOS で自動ペーストを行う場合、アクセシビリティ権限が付与されていること。
 
 ## シーケンス
 
@@ -16,7 +17,7 @@
 sequenceDiagram
     participant User
     participant SourceApp as Source Application
-    participant Clipboard as Windows Clipboard
+    participant Clipboard as OS Clipboard
     participant Jubako
     participant DB as SQLite
     participant TargetApp as Target Application
@@ -32,14 +33,14 @@ sequenceDiagram
         Jubako-->>Jubako: 挿入をスキップ
     end
 
-    User->>Jubako: Win+Alt+V を押下
+    User->>Jubako: Win+Alt+V (Win) / Cmd+Option+V (Mac) を押下
     Jubako->>DB: 履歴とフォルダを読み込み
     Jubako->>User: ポップアップ一覧を描画
 
     User->>Jubako: 貼り付け対象を選択
     Jubako->>Clipboard: set_text or set_image
-    Jubako-->>Jubako: ウィンドウを隠す
-    Jubako->>TargetApp: Simulate Ctrl+V
+    Jubako-->>Jubako: ウィンドウ・アプリを隠す
+    Jubako->>TargetApp: Simulate Ctrl+V (Win) / Cmd+V (Mac)
 ```
 
 ## 異常系
@@ -53,4 +54,3 @@ sequenceDiagram
 
 - 履歴エントリは起動時にセッション単位で初期化されます（`folder_id IS NULL` を `clear_history`）。
 - フォルダ配下アイテムは再起動後も保持され、`folder_id = NULL` に戻すことで履歴側へ戻せます。
-

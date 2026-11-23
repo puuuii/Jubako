@@ -13,7 +13,7 @@ flowchart LR
     WindowSvc[発行者: ウィンドウイベント監視]
 
     HotkeyQ[(キュー: global_hotkey receiver)]
-    ClipboardQ[(キュー: WM_CLIPBOARDUPDATE channel)]
+    ClipboardQ[(キュー: WM_CLIPBOARDUPDATE / NSPasteboard changeCount)]
     WindowQ[(キュー: Iced window events)]
 
     EventBus[(イベントバス: Iced Subscription Stream)]
@@ -34,8 +34,8 @@ flowchart LR
 
 | イベント | 発行者 | 消費者 | ペイロード要約 | 配信セマンティクス |
 | --- | --- | --- | --- | --- |
-| `HotKeyPressed` | Windows グローバルホットキーサービス | 更新リデューサ | ホットキー ID + 押下状態 | 受信 OS イベントごとに高々 1 回 |
-| `ClipboardUpdated` | Windows クリップボード監視スレッド | 更新リデューサ | クリップボード更新シグナル（実データは遅延取得） | ベストエフォート。連続更新は集約され得る |
+| `HotKeyPressed` | OS グローバルホットキーサービス | 更新リデューサ | ホットキー ID + 押下状態 | 受信 OS イベントごとに高々 1 回 |
+| `ClipboardUpdated` | クリップボード監視（Windows: `WM_CLIPBOARDUPDATE` / macOS: `NSPasteboard.changeCount`） | 更新リデューサ | クリップボード更新シグナル（実データは遅延取得） | ベストエフォート。連続更新は集約され得る |
 | `WindowUnfocused` | Iced ウィンドウリスナー | 更新リデューサ | フォーカス喪失イベント | コールバックごとに高々 1 回 |
 | `CloseRequested` | Iced ウィンドウリスナー | 更新リデューサ | クローズ要求意図 | コールバックごとに高々 1 回 |
 | `PasteItem/PasteImageItem` | UI 操作 | クリップボードアダプタ | 選択アイテム ID / 内容 | クリックごとに高々 1 回 |
@@ -52,4 +52,3 @@ flowchart LR
 - 現状の可観測性は標準エラー出力（`eprintln!`）と UI 目視確認に限定されます。
 - イベント ID や相関 ID がないため、横断的トレースは困難です。
 - 改善案として、イベント種別・アイテム ID・結果を含む構造化ログ導入を推奨します。
-

@@ -9,8 +9,8 @@
 
 ```mermaid
 flowchart LR
-    Source[入力元: Windows クリップボード]
-    Trigger[トリガー: WM_CLIPBOARDUPDATE]
+    Source[入力元: OS クリップボード]
+    Trigger[トリガー: WM_CLIPBOARDUPDATE / NSPasteboard changeCount]
     Extract[抽出: arboard get_text/get_image]
     Transform[変換: 重複排除 + 画像説明フォーマット]
     Validate[検証: 非空テキスト / 画像サイズ解析可能]
@@ -77,10 +77,10 @@ flowchart LR
 
 ### スケジューリングと SLA
 
-- パイプライン起動は OS クリップボード通知を起点とするイベント駆動で、cron 実行はありません。
-- クリップボードポーリングは購読ループ 1 サイクルあたり最大 1 秒待機します。
+- パイプライン起動は Windows では OS クリップボード通知起点、macOS では `NSPasteboard.changeCount` の 250ms ポーリングで動作し、cron 実行はありません。
+- クリップボード監視は購読ループ 1 サイクルあたり最大 1 秒待機します。
 - コピー後の履歴反映は体感即時（通常 1 秒未満）を目標とします。
-- 貼り付け時はウィンドウ非表示との競合回避のため、キー送信前に約 150ms の意図的遅延を入れます。
+- 貼り付け時はウィンドウ非表示との競合回避のため、キー送信前に約 80ms の意図的遅延を入れます。
 
 ### 障害時ハンドリング
 
@@ -89,5 +89,3 @@ flowchart LR
 - 任意列 `content_blob` のマイグレーション失敗は許容し（`run_migrations` がエラーを無視）、起動継続性を優先します。
 - イベントチャネル断が起きても購読側は `Noop` を発行し、ループを継続します。
 <!-- END:data-pipeline -->
-
-
