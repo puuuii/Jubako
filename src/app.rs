@@ -1,11 +1,11 @@
 use arboard::Clipboard;
 use enigo::{Enigo, Settings};
 use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyManager, HotKeyState,
+    hotkey::{Code, HotKey, Modifiers},
 };
 use iced::widget::image;
-use iced::{event, mouse, window, Event, Point, Size, Subscription, Task, Theme};
+use iced::{Event, Point, Size, Subscription, Task, Theme, event, mouse, window};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -104,7 +104,7 @@ pub fn run() -> iced::Result {
 impl Jubako {
     fn new() -> (Self, Task<Message>) {
         let db = Arc::new(Db::new().expect("Failed to initialize DB"));
-        
+
         let clipboard = Arc::new(Mutex::new(
             Clipboard::new().expect("Failed to initialize clipboard"),
         ));
@@ -290,6 +290,7 @@ impl Jubako {
     fn hide_window(&mut self) -> Task<Message> {
         self.is_visible = false;
         self.reset_transient_state();
+        platform::hide_application();
 
         window::get_latest().and_then(|id| window::change_mode(id, window::Mode::Hidden))
     }

@@ -21,8 +21,8 @@ pub(super) fn ensure_startup_registration() {}
 
 #[cfg(target_os = "windows")]
 fn ensure_startup_registration_inner() -> anyhow::Result<()> {
-    use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     const APP_NAME: &str = "Jubako";
@@ -53,7 +53,7 @@ fn startup_command_string() -> anyhow::Result<String> {
 #[cfg(target_os = "windows")]
 pub(super) fn wait_for_clipboard_update(timeout: Duration) -> bool {
     use once_cell::sync::Lazy;
-    use std::sync::{mpsc, Mutex};
+    use std::sync::{Mutex, mpsc};
 
     static EVENT_RX: Lazy<Option<Mutex<mpsc::Receiver<()>>>> = Lazy::new(|| {
         let (tx, rx) = mpsc::channel();
@@ -89,17 +89,17 @@ pub(super) fn wait_for_clipboard_update(timeout: Duration) -> bool {
 #[cfg(target_os = "windows")]
 fn clipboard_listener_thread(sender: std::sync::mpsc::Sender<()>) {
     use std::ffi::c_void;
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::DataExchange::{
         AddClipboardFormatListener, RemoveClipboardFormatListener,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        GetWindowLongPtrW, RegisterClassW, SetWindowLongPtrW, TranslateMessage, CREATESTRUCTW,
-        GWLP_USERDATA, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
+        CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+        GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, HWND_MESSAGE, MSG, RegisterClassW,
+        SetWindowLongPtrW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
         WM_NCCREATE, WM_NCDESTROY, WNDCLASSW,
     };
+    use windows::core::PCWSTR;
 
     unsafe extern "system" fn clipboard_window_proc(
         window: HWND,
@@ -209,10 +209,35 @@ fn clipboard_listener_thread(sender: std::sync::mpsc::Sender<()>) {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 pub(super) fn wait_for_clipboard_update(timeout: Duration) -> bool {
-    std::thread::sleep(timeout);
-    false
+    use objc2_app_kit::NSPasteboard;
+    use std::sync::atomic::{AtomicIsize, Ordering};
+
+    static LAST_CHANGE_COUNT: AtomicIsize = AtomicIsize::new(-1);
+
+    let step = Duration::from_millis(250);
+    let deadline = std::time::Instant::now() + timeout;
+
+    loop {
+        let count = unsafe { NSPasteboard::generalPasteboard().changeCount() };
+        let prev = LAST_CHANGE_COUNT.swap(count, Ordering::Relaxed);
+        if prev != -1 && prev != count {
+            return true;
+        }
+
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        std::thread::sleep(step.min(deadline - now));
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub(super) fn wait_for_clipboard_update(timeout: Duration) -> bool {
+    std::thread::sleep(timeout.min(Duration::from_millis(500)));
+    true
 }
 
 #[cfg(target_os = "windows")]
@@ -230,7 +255,59 @@ pub(super) fn get_cursor_position() -> Option<Point> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn macos_display_scale(display: core_graphics::display::CGDisplay) -> f32 {
+    let bounds = display.bounds();
+    if bounds.size.width > 0.0 {
+        if let Some(mode) = display.display_mode() {
+            let scale = mode.pixel_width() as f32 / bounds.size.width as f32;
+            if scale > 0.0 {
+                return scale;
+            }
+        }
+    }
+    1.0
+}
+
+#[cfg(target_os = "macos")]
+fn macos_cursor_logical() -> Option<core_graphics::geometry::CGPoint> {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
+    let event = CGEvent::new(source).ok()?;
+    Some(event.location())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_display_at(
+    point: core_graphics::geometry::CGPoint,
+) -> Option<core_graphics::display::CGDisplay> {
+    use core_graphics::display::CGDisplay;
+
+    let ids = CGDisplay::active_displays().ok()?;
+    for id in ids {
+        let display = CGDisplay::new(id);
+        let b = display.bounds();
+        if point.x >= b.origin.x
+            && point.x < b.origin.x + b.size.width
+            && point.y >= b.origin.y
+            && point.y < b.origin.y + b.size.height
+        {
+            return Some(display);
+        }
+    }
+    Some(CGDisplay::main())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn get_cursor_position() -> Option<Point> {
+    let pt = macos_cursor_logical()?;
+    let scale = macos_display_at(pt).map(macos_display_scale).unwrap_or(1.0);
+    Some(Point::new(pt.x as f32 * scale, pt.y as f32 * scale))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub(super) fn get_cursor_position() -> Option<Point> {
     None
 }
@@ -239,7 +316,7 @@ pub(super) fn get_cursor_position() -> Option<Point> {
 pub(super) fn get_monitor_rect_at_cursor() -> Option<(Point, Size)> {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
     };
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
@@ -270,7 +347,19 @@ pub(super) fn get_monitor_rect_at_cursor() -> Option<(Point, Size)> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+pub(super) fn get_monitor_rect_at_cursor() -> Option<(Point, Size)> {
+    let pt = macos_cursor_logical()?;
+    let display = macos_display_at(pt)?;
+    let scale = macos_display_scale(display);
+    let b = display.bounds();
+    Some((
+        Point::new(b.origin.x as f32 * scale, b.origin.y as f32 * scale),
+        Size::new(b.size.width as f32 * scale, b.size.height as f32 * scale),
+    ))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub(super) fn get_monitor_rect_at_cursor() -> Option<(Point, Size)> {
     None
 }
@@ -278,7 +367,7 @@ pub(super) fn get_monitor_rect_at_cursor() -> Option<(Point, Size)> {
 #[cfg(target_os = "windows")]
 pub(super) fn get_monitor_scale_factor_at_cursor() -> Option<f32> {
     use windows::Win32::Foundation::POINT;
-    use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONEAREST};
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
     use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
@@ -302,14 +391,42 @@ pub(super) fn get_monitor_scale_factor_at_cursor() -> Option<f32> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+pub(super) fn get_monitor_scale_factor_at_cursor() -> Option<f32> {
+    let pt = macos_cursor_logical()?;
+    let display = macos_display_at(pt)?;
+    Some(macos_display_scale(display))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub(super) fn get_monitor_scale_factor_at_cursor() -> Option<f32> {
     None
 }
 
 #[cfg(target_os = "macos")]
 pub(super) fn apply_tool_window_style() {
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+    use objc2_foundation::MainThreadMarker;
+
+    if let Some(mtm) = MainThreadMarker::new() {
+        let app = NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    }
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 pub(super) fn apply_tool_window_style() {}
+
+#[cfg(target_os = "macos")]
+pub(super) fn hide_application() {
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+
+    if let Some(mtm) = MainThreadMarker::new() {
+        let app = NSApplication::sharedApplication(mtm);
+        app.hide(None);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn hide_application() {}

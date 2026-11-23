@@ -133,31 +133,26 @@ pub(super) fn parse_image_description(description: &str) -> Option<(usize, usize
 }
 
 fn simulate_paste(_app: &Jubako) -> Task<Message> {
-    // ウィンドウを隠すタスク
+    super::platform::hide_application();
+
     let hide_task = window::get_latest()
         .and_then(|id| window::change_mode::<Message>(id, window::Mode::Hidden));
 
     let paste_task = Task::perform(
         async move {
-            // 少し長めに待機して、フォーカスが戻るのを確実に待つ
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(80)).await;
 
-            // Enigo の利用を復活させるが、非同期処理の外で確実に実行
             #[cfg(target_os = "macos")]
             {
-                // アクティブなアプリを特定してフォーカスを戻し、ペーストを送る最も確実な AppleScript
-                let script = r#"
-                    tell application "System Events"
-                        set activeApp to (first process whose frontmost is true)
-                        -- 一度他のアプリに戻るように明示的に命令を出す（もしJubakoなら直前のアプリへ）
-                        key code 48 using {command down} -- Command + Tab 相当を送り、フォーカスを強制的に切り替える
-                        keystroke "v" using command down
-                    end tell
-                "#;
-                let _ = std::process::Command::new("osascript")
-                    .arg("-e")
-                    .arg(script)
-                    .status(); // status() で完了を待つ
+                let _ = tokio::task::spawn_blocking(|| {
+                    let script =
+                        r#"tell application "System Events" to keystroke "v" using command down"#;
+                    let _ = std::process::Command::new("osascript")
+                        .arg("-e")
+                        .arg(script)
+                        .status();
+                })
+                .await;
             }
         },
         |_| Message::Noop,
