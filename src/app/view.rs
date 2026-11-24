@@ -2,14 +2,18 @@ use iced::widget::{
     button, column, container, horizontal_rule, horizontal_space, image, mouse_area, row,
     scrollable, text, text_input, Column, Row, Space,
 };
-use iced::{Color, Element, Length, Theme};
+use iced::{window, Color, Element, Length, Theme};
 
 use crate::db::{Folder, Item};
 
 use super::{clipboard, Dialog, Jubako, Message, ViewMode};
 
 impl Jubako {
-    pub(super) fn view(&self) -> Element<'_, Message> {
+    pub(super) fn view(&self, _window: window::Id) -> Element<'_, Message> {
+        if !self.is_visible {
+            return Space::new(0, 0).into();
+        }
+
         let body = row![
             container(self.view_sidebar())
                 .width(Length::FillPortion(1))

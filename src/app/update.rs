@@ -11,12 +11,8 @@ impl Jubako {
             Message::ToggleWindow => self.handle_toggle_window(),
             Message::HideWindow => self.hide_window(),
             Message::WindowFocusLost => self.handle_window_focus_lost(),
-            Message::PasteItem(content) => {
-                clipboard::set_text_and_simulate_paste(self, content)
-            },
-            Message::PasteImageItem(item_id) => {
-                self.handle_paste_image_item(item_id)
-            },
+            Message::PasteItem(content) => clipboard::set_text_and_simulate_paste(self, content),
+            Message::PasteImageItem(item_id) => self.handle_paste_image_item(item_id),
             Message::DeleteItem(id) => self.handle_delete_item(id),
             Message::StartDragItem(id) => self.handle_start_drag_item(id),
             Message::DragOverFolder(folder_id) => self.handle_drag_over_folder(folder_id),
@@ -45,7 +41,7 @@ impl Jubako {
     }
 
     fn handle_clipboard_updated(&mut self) -> Task<Message> {
-        if clipboard::poll_clipboard(self) {
+        if self.is_visible && self.current_view == ViewMode::History {
             self.load_items();
         }
 
@@ -62,8 +58,9 @@ impl Jubako {
         let Ok(Some(blob)) = self.db.get_item_blob(item_id) else {
             return Task::none();
         };
+        let rgba = clipboard::decompress_rgba(&blob, width, height);
 
-        clipboard::set_image_and_simulate_paste(self, width, height, blob)
+        clipboard::set_image_and_simulate_paste(self, width, height, rgba)
     }
 
     fn handle_toggle_window(&mut self) -> Task<Message> {
@@ -84,6 +81,7 @@ impl Jubako {
 
     fn handle_delete_item(&mut self, id: i64) -> Task<Message> {
         let _ = self.db.delete_item(id);
+        self.image_handle_cache.remove(&id);
         self.refresh_data();
         Task::none()
     }

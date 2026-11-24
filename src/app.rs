@@ -7,7 +7,8 @@ use global_hotkey::{
 use iced::widget::image;
 use iced::{Event, Point, Size, Subscription, Task, Theme, event, mouse, window};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use crate::db::{Db, Folder, Item};
@@ -65,8 +66,8 @@ enum Message {
 struct Jubako {
     db: Arc<Db>,
     clipboard: Arc<Mutex<Clipboard>>,
-    last_clipboard_content: String,
-    last_clipboard_image_hash: u64,
+    clipboard_state: Arc<Mutex<clipboard::ClipboardState>>,
+    clipboard_ui_rx: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
     current_view: ViewMode,
     items: Vec<Item>,
     folders: Vec<Folder>,
@@ -74,7 +75,9 @@ struct Jubako {
     hotkey_manager: GlobalHotKeyManager,
     #[allow(dead_code)]
     hotkey_id: u32,
+    window_id: Option<window::Id>,
     is_visible: bool,
+    is_visible_flag: Arc<AtomicBool>,
     dialog: Option<Dialog>,
     enigo: Arc<Mutex<Enigo>>,
     expanded_folder_actions: Option<i64>,
@@ -86,18 +89,9 @@ struct Jubako {
 pub fn run() -> iced::Result {
     platform::ensure_startup_registration();
 
-    iced::application("Jubako", Jubako::update, Jubako::view)
+    iced::daemon("Jubako", Jubako::update, Jubako::view)
         .subscription(Jubako::subscription)
-        .theme(|_| Theme::Dark)
-        .window(window::Settings {
-            size: Size::new(640.0, 520.0),
-            position: window::Position::Centered,
-            visible: false,
-            decorations: false,
-            level: window::Level::AlwaysOnTop,
-            exit_on_close_request: false,
-            ..window::Settings::default()
-        })
+        .theme(|_, _| Theme::Dark)
         .run_with(Jubako::new)
 }
 
@@ -108,6 +102,7 @@ impl Jubako {
         let clipboard = Arc::new(Mutex::new(
             Clipboard::new().expect("Failed to initialize clipboard"),
         ));
+        let clipboard_state = Arc::new(Mutex::new(clipboard::ClipboardState::default()));
 
         let manager = GlobalHotKeyManager::new().expect("Failed to init hotkey manager");
         let hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::ALT), Code::KeyV);
@@ -118,17 +113,50 @@ impl Jubako {
             Enigo::new(&Settings::default()).expect("Failed to init enigo"),
         ));
 
+        if let Err(error) = db.clear_history() {
+            eprintln!("Failed to reset history on startup: {}", error);
+        }
+
+        clipboard::capture_initial_clipboard(&db, &clipboard, &clipboard_state);
+
+        let is_visible_flag = Arc::new(AtomicBool::new(false));
+        let (ui_tx, ui_rx) = mpsc::channel();
+
+        let monitor_db = Arc::clone(&db);
+        let monitor_clipboard = Arc::clone(&clipboard);
+        let monitor_state = Arc::clone(&clipboard_state);
+        let monitor_visible = Arc::clone(&is_visible_flag);
+
+        let _ = std::thread::Builder::new()
+            .name("jubako-clipboard-monitor".to_string())
+            .spawn(move || loop {
+                if platform::wait_for_next_clipboard_update() {
+                    let changed = clipboard::poll_clipboard_background(
+                        &monitor_db,
+                        &monitor_clipboard,
+                        &monitor_state,
+                    );
+                    if changed && monitor_visible.load(Ordering::Relaxed) {
+                        let _ = ui_tx.send(());
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            });
+
         let mut app = Self {
             db,
             clipboard,
-            last_clipboard_content: String::new(),
-            last_clipboard_image_hash: 0,
+            clipboard_state,
+            clipboard_ui_rx: Arc::new(Mutex::new(Some(ui_rx))),
             current_view: ViewMode::History,
             items: Vec::new(),
             folders: Vec::new(),
             hotkey_manager: manager,
             hotkey_id,
+            window_id: None,
             is_visible: false,
+            is_visible_flag,
             dialog: None,
             enigo,
             expanded_folder_actions: None,
@@ -137,13 +165,7 @@ impl Jubako {
             image_handle_cache: HashMap::new(),
         };
 
-        if let Err(error) = app.db.clear_history() {
-            eprintln!("Failed to reset history on startup: {}", error);
-        }
-
         app.load_folders();
-        clipboard::capture_initial_clipboard(&mut app);
-        app.load_items();
 
         let task = Task::perform(
             async {
@@ -194,6 +216,17 @@ impl Jubako {
                 continue;
             }
 
+            if let Ok(Some((thumb_blob, tw, th))) = self.db.get_item_thumbnail(item_id) {
+                if tw > 0 && th > 0 {
+                    let thumb_rgba = clipboard::decompress_rgba(&thumb_blob, tw, th);
+                    self.image_handle_cache.insert(
+                        item_id,
+                        image::Handle::from_rgba(tw as u32, th as u32, thumb_rgba),
+                    );
+                    continue;
+                }
+            }
+
             let Some(item) = self.items.iter().find(|item| item.id == item_id) else {
                 continue;
             };
@@ -205,9 +238,18 @@ impl Jubako {
                 continue;
             };
 
+            let raw_rgba = clipboard::decompress_rgba(&blob, width, height);
+            let (tw, th, thumb_rgba) = clipboard::downscale_rgba(
+                &raw_rgba,
+                width,
+                height,
+                clipboard::THUMBNAIL_MAX_WIDTH,
+                clipboard::THUMBNAIL_MAX_HEIGHT,
+            );
+
             self.image_handle_cache.insert(
                 item_id,
-                image::Handle::from_rgba(width as u32, height as u32, blob),
+                image::Handle::from_rgba(tw as u32, th as u32, thumb_rgba),
             );
         }
     }
@@ -229,7 +271,10 @@ impl Jubako {
         const WINDOW_HEIGHT: f32 = 520.0;
 
         self.is_visible = true;
+        self.is_visible_flag.store(true, Ordering::Relaxed);
         self.reset_transient_state();
+        clipboard::poll_clipboard_background(&self.db, &self.clipboard, &self.clipboard_state);
+        platform::notify_clipboard_activity();
         self.refresh_data();
 
         let cursor_pos = platform::get_cursor_position();
@@ -238,109 +283,154 @@ impl Jubako {
             .filter(|scale| *scale > 0.0)
             .unwrap_or(1.0);
 
-        window::get_latest().and_then(move |id| {
-            window::get_scale_factor(id).then(move |window_scale| {
-                let mut tasks: Vec<Task<Message>> = Vec::new();
+        let adjusted_logical = cursor_pos.map(|pos| {
+            let adjusted_physical = if let Some((origin, size)) = monitor_rect {
+                let mid_x = origin.x + size.width / 2.0;
+                let mid_y = origin.y + size.height / 2.0;
+                let window_width_physical = WINDOW_WIDTH * target_monitor_scale;
+                let window_height_physical = WINDOW_HEIGHT * target_monitor_scale;
 
-                if let Some(pos) = cursor_pos {
-                    let adjusted_physical = if let Some((origin, size)) = monitor_rect {
-                        let mid_x = origin.x + size.width / 2.0;
-                        let mid_y = origin.y + size.height / 2.0;
-                        let window_width_physical = WINDOW_WIDTH * target_monitor_scale;
-                        let window_height_physical = WINDOW_HEIGHT * target_monitor_scale;
+                let x = if pos.x >= mid_x {
+                    pos.x - window_width_physical
+                } else {
+                    pos.x
+                };
 
-                        let x = if pos.x >= mid_x {
-                            pos.x - window_width_physical
-                        } else {
-                            pos.x
-                        };
+                let y = if pos.y >= mid_y {
+                    pos.y - window_height_physical
+                } else {
+                    pos.y
+                };
 
-                        let y = if pos.y >= mid_y {
-                            pos.y - window_height_physical
-                        } else {
-                            pos.y
-                        };
+                Point::new(x, y)
+            } else {
+                pos
+            };
 
-                        Point::new(x, y)
-                    } else {
-                        pos
-                    };
+            Point::new(
+                adjusted_physical.x / target_monitor_scale,
+                adjusted_physical.y / target_monitor_scale,
+            )
+        });
 
-                    let move_scale = if window_scale > 0.0 {
-                        window_scale
-                    } else {
-                        1.0
-                    };
-                    let adjusted_logical = Point::new(
-                        adjusted_physical.x / move_scale,
-                        adjusted_physical.y / move_scale,
-                    );
+        if let Some(id) = self.window_id {
+            let mut tasks = Vec::new();
+            if let Some(pos) = adjusted_logical {
+                tasks.push(window::move_to(id, pos));
+            }
+            tasks.push(window::change_mode(id, window::Mode::Windowed));
+            tasks.push(window::gain_focus(id));
+            Task::batch(tasks)
+        } else {
+            let position = adjusted_logical
+                .map(window::Position::Specific)
+                .unwrap_or(window::Position::Centered);
 
-                    tasks.push(window::move_to(id, adjusted_logical));
-                }
+            let (id, open_task) = window::open(window::Settings {
+                size: Size::new(WINDOW_WIDTH, WINDOW_HEIGHT),
+                position,
+                visible: true,
+                decorations: false,
+                level: window::Level::AlwaysOnTop,
+                exit_on_close_request: false,
+                ..window::Settings::default()
+            });
+            self.window_id = Some(id);
 
-                tasks.push(window::change_mode(id, window::Mode::Windowed));
-                tasks.push(window::gain_focus(id));
-
-                Task::batch(tasks)
-            })
-        })
+            Task::batch(vec![
+                open_task.map(|_| Message::Noop),
+                window::gain_focus(id),
+            ])
+        }
     }
 
-    fn hide_window(&mut self) -> Task<Message> {
+    pub(super) fn hide_window(&mut self) -> Task<Message> {
         self.is_visible = false;
+        self.is_visible_flag.store(false, Ordering::Relaxed);
         self.reset_transient_state();
+        self.items.clear();
         platform::hide_application();
 
-        window::get_latest().and_then(|id| window::change_mode(id, window::Mode::Hidden))
+        if let Some(id) = self.window_id.take() {
+            window::close(id)
+        } else {
+            Task::none()
+        }
     }
 
     fn subscription(&self) -> Subscription<Message> {
         let hotkey_sub = Subscription::run(|| {
             iced::futures::stream::unfold((), |_| async {
-                let result = tokio::task::spawn_blocking(|| {
-                    global_hotkey::GlobalHotKeyEvent::receiver().recv()
-                })
-                .await;
+                loop {
+                    let result = tokio::task::spawn_blocking(|| {
+                        global_hotkey::GlobalHotKeyEvent::receiver().recv()
+                    })
+                    .await;
 
-                match result {
-                    Ok(Ok(event)) if event.state == HotKeyState::Pressed => {
-                        Some((Message::ToggleWindow, ()))
-                    }
-                    Ok(Ok(_)) => Some((Message::Noop, ())),
-                    _ => {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        Some((Message::Noop, ()))
+                    match result {
+                        Ok(Ok(event)) if event.state == HotKeyState::Pressed => {
+                            return Some((Message::ToggleWindow, ()));
+                        }
+                        Ok(Ok(_)) => continue,
+                        _ => {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
                     }
                 }
             })
         });
 
-        let clipboard_sub = Subscription::run(|| {
-            iced::futures::stream::unfold((), |_| async {
-                let updated = tokio::task::spawn_blocking(|| {
-                    platform::wait_for_clipboard_update(Duration::from_secs(1))
-                })
-                .await
-                .unwrap_or(false);
+        let ui_rx = self
+            .clipboard_ui_rx
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
 
-                if updated {
-                    Some((Message::ClipboardUpdated, ()))
-                } else {
-                    Some((Message::Noop, ()))
-                }
+        let clipboard_sub = if let Some(rx) = ui_rx {
+            Subscription::run_with_id(
+                "clipboard-ui-updates",
+                iced::futures::stream::unfold(Arc::new(Mutex::new(rx)), |rx| async move {
+                    let rx_clone = Arc::clone(&rx);
+                    let received = tokio::task::spawn_blocking(move || {
+                        rx_clone.lock().ok().and_then(|guard| guard.recv().ok())
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+
+                    if received {
+                        Some((Message::ClipboardUpdated, rx))
+                    } else {
+                        None
+                    }
+                }),
+            )
+        } else {
+            Subscription::none()
+        };
+
+        let window_sub = if self.is_visible {
+            event::listen_with(|event, _status, _id| match event {
+                Event::Window(window::Event::Unfocused) => Some(Message::WindowFocusLost),
+                Event::Window(window::Event::CloseRequested) => Some(Message::HideWindow),
+                _ => None,
             })
-        });
+        } else {
+            Subscription::none()
+        };
 
-        let focus_sub = event::listen_with(|event, _status, _id| match event {
-            Event::Window(window::Event::Unfocused) => Some(Message::WindowFocusLost),
-            Event::Window(window::Event::CloseRequested) => Some(Message::HideWindow),
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                Some(Message::CancelDrag)
-            }
-            _ => None,
-        });
+        let drag_sub = if self.is_visible && self.dragging_item_id.is_some() {
+            event::listen_with(|event, _status, _id| match event {
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    Some(Message::CancelDrag)
+                }
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
 
-        Subscription::batch(vec![hotkey_sub, clipboard_sub, focus_sub])
+        Subscription::batch(vec![hotkey_sub, clipboard_sub, window_sub, drag_sub])
     }
 }

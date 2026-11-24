@@ -1,5 +1,11 @@
 use iced::{Point, Size};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static CLIPBOARD_ACTIVITY: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn notify_clipboard_activity() {
+    CLIPBOARD_ACTIVITY.store(true, Ordering::Relaxed);
+}
 
 #[cfg(target_os = "windows")]
 pub(super) fn ensure_startup_registration() {
@@ -51,7 +57,7 @@ fn startup_command_string() -> anyhow::Result<String> {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn wait_for_clipboard_update(timeout: Duration) -> bool {
+pub(super) fn wait_for_next_clipboard_update() -> bool {
     use once_cell::sync::Lazy;
     use std::sync::{Mutex, mpsc};
 
@@ -71,19 +77,13 @@ pub(super) fn wait_for_clipboard_update(timeout: Duration) -> bool {
     });
 
     let Some(receiver) = EVENT_RX.as_ref() else {
-        std::thread::sleep(timeout);
-        return true;
+        return false;
     };
     let Ok(receiver) = receiver.lock() else {
-        std::thread::sleep(timeout);
-        return true;
+        return false;
     };
 
-    match receiver.recv_timeout(timeout) {
-        Ok(()) => true,
-        Err(mpsc::RecvTimeoutError::Timeout) => false,
-        Err(mpsc::RecvTimeoutError::Disconnected) => true,
-    }
+    receiver.recv().is_ok()
 }
 
 #[cfg(target_os = "windows")]
@@ -210,33 +210,271 @@ fn clipboard_listener_thread(sender: std::sync::mpsc::Sender<()>) {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn wait_for_clipboard_update(timeout: Duration) -> bool {
+mod macos_timer {
+    use std::ffi::{c_char, c_void};
+    use std::sync::{Mutex, OnceLock};
+
+    type DispatchObject = *mut c_void;
+    type DispatchQueue = *mut c_void;
+    type DispatchSource = *mut c_void;
+    type DispatchSemaphore = *mut c_void;
+    type DispatchTime = u64;
+
+    const DISPATCH_TIME_NOW: DispatchTime = 0;
+    const DISPATCH_TIME_FOREVER: DispatchTime = u64::MAX;
+    const NSEC_PER_MSEC: u64 = 1_000_000;
+
+    extern "C" {
+        static _dispatch_source_type_timer: c_void;
+        fn dispatch_queue_create(label: *const c_char, attr: *const c_void) -> DispatchQueue;
+        fn dispatch_source_create(
+            type_: *const c_void,
+            handle: usize,
+            mask: usize,
+            queue: DispatchQueue,
+        ) -> DispatchSource;
+        fn dispatch_source_set_timer(
+            source: DispatchSource,
+            start: DispatchTime,
+            interval: u64,
+            leeway: u64,
+        );
+        fn dispatch_source_set_event_handler_f(
+            source: DispatchSource,
+            handler: extern "C" fn(*mut c_void),
+        );
+        fn dispatch_set_context(object: DispatchObject, context: *mut c_void);
+        fn dispatch_resume(object: DispatchObject);
+        fn dispatch_time(when: DispatchTime, delta: i64) -> DispatchTime;
+        fn dispatch_semaphore_create(value: isize) -> DispatchSemaphore;
+        fn dispatch_semaphore_wait(dsema: DispatchSemaphore, timeout: DispatchTime) -> isize;
+        fn dispatch_semaphore_signal(dsema: DispatchSemaphore) -> isize;
+    }
+
+    extern "C" fn on_timer_fire(context: *mut c_void) {
+        if !context.is_null() {
+            unsafe {
+                dispatch_semaphore_signal(context);
+            }
+        }
+    }
+
+    struct LeewayTimer {
+        source: DispatchSource,
+        semaphore: DispatchSemaphore,
+    }
+
+    unsafe impl Send for LeewayTimer {}
+
+    impl LeewayTimer {
+        fn new() -> Self {
+            unsafe {
+                let label = b"com.jubako.clipboard_timer\0";
+                let queue = dispatch_queue_create(label.as_ptr() as *const c_char, std::ptr::null());
+                let semaphore = dispatch_semaphore_create(0);
+                let source = dispatch_source_create(
+                    &_dispatch_source_type_timer as *const _ as *const c_void,
+                    0,
+                    0,
+                    queue,
+                );
+                dispatch_set_context(source, semaphore);
+                dispatch_source_set_event_handler_f(source, on_timer_fire);
+                dispatch_source_set_timer(source, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
+                dispatch_resume(source);
+
+                Self { source, semaphore }
+            }
+        }
+
+        fn sleep(&self, delay_ms: u64, leeway_ms: u64) {
+            unsafe {
+                let start = dispatch_time(DISPATCH_TIME_NOW, (delay_ms * NSEC_PER_MSEC) as i64);
+                dispatch_source_set_timer(
+                    self.source,
+                    start,
+                    DISPATCH_TIME_FOREVER,
+                    leeway_ms * NSEC_PER_MSEC,
+                );
+                dispatch_semaphore_wait(self.semaphore, DISPATCH_TIME_FOREVER);
+            }
+        }
+    }
+
+    pub(super) fn sleep_with_leeway(delay_ms: u64, leeway_ms: u64) {
+        static TIMER: OnceLock<Mutex<LeewayTimer>> = OnceLock::new();
+        let timer = TIMER.get_or_init(|| Mutex::new(LeewayTimer::new()));
+        if let Ok(guard) = timer.lock() {
+            guard.sleep(delay_ms, leeway_ms);
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_activity {
+    // CoreGraphics exposes both the system-wide input-idle timer and display
+    // power state. Reading these values does not require installing a global
+    // event tap.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceSecondsSinceLastEventType(
+            state_id: u32,
+            event_type: u32,
+        ) -> f64;
+        fn CGGetOnlineDisplayList(
+            max_displays: u32,
+            online_displays: *mut u32,
+            display_count: *mut u32,
+        ) -> i32;
+        fn CGDisplayIsAsleep(display: u32) -> i32;
+    }
+
+    const CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE: u32 = 1;
+    const CG_ANY_INPUT_EVENT_TYPE: u32 = u32::MAX;
+
+    pub(super) fn seconds_since_last_user_input() -> Option<f64> {
+        let seconds = unsafe {
+            CGEventSourceSecondsSinceLastEventType(
+                CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE,
+                CG_ANY_INPUT_EVENT_TYPE,
+            )
+        };
+
+        (seconds.is_finite() && seconds >= 0.0).then_some(seconds)
+    }
+
+    pub(super) fn all_displays_are_asleep() -> bool {
+        let mut display_count = 0u32;
+        let first_result = unsafe {
+            CGGetOnlineDisplayList(0, std::ptr::null_mut(), &mut display_count)
+        };
+
+        // Fail open: if CoreGraphics cannot report the display state, keep
+        // clipboard monitoring enabled rather than silently missing copies.
+        if first_result != 0 || display_count == 0 {
+            return false;
+        }
+
+        // A fixed stack buffer avoids allocating a Vec on every monitor
+        // cycle. More than 32 online displays is unusual; in that case fail
+        // open and continue monitoring the clipboard.
+        const MAX_ONLINE_DISPLAYS: u32 = 32;
+        if display_count > MAX_ONLINE_DISPLAYS {
+            return false;
+        }
+
+        let capacity = display_count;
+        let mut displays = [0u32; MAX_ONLINE_DISPLAYS as usize];
+        let second_result = unsafe {
+            CGGetOnlineDisplayList(
+                capacity,
+                displays.as_mut_ptr(),
+                &mut display_count,
+            )
+        };
+
+        if second_result != 0 || display_count == 0 || display_count > capacity {
+            return false;
+        }
+
+        displays[..display_count as usize]
+            .iter()
+            .all(|display| unsafe { CGDisplayIsAsleep(*display) != 0 })
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn wait_for_next_clipboard_update() -> bool {
     use objc2_app_kit::NSPasteboard;
-    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::sync::atomic::{AtomicIsize, AtomicU64};
+
+    const MIN_INTERVAL_MS: u64 = 600;
+    const MAX_INTERVAL_MS: u64 = 5000;
+    const INPUT_IDLE_TIMEOUT_SECS: f64 = 60.0;
+    // While paused, only check the inexpensive activity/display state. The
+    // clipboard itself is not queried until monitoring resumes.
+    const PAUSED_CHECK_INTERVAL_MS: u64 = 5_000;
 
     static LAST_CHANGE_COUNT: AtomicIsize = AtomicIsize::new(-1);
+    static CURRENT_INTERVAL_MS: AtomicU64 = AtomicU64::new(MIN_INTERVAL_MS);
 
-    let step = Duration::from_millis(250);
-    let deadline = std::time::Instant::now() + timeout;
+    let mut was_paused = false;
 
     loop {
+        let input_idle_seconds = macos_activity::seconds_since_last_user_input();
+        let input_idle = input_idle_seconds
+            .map(|seconds| seconds >= INPUT_IDLE_TIMEOUT_SECS)
+            .unwrap_or(false);
+        let displays_asleep = macos_activity::all_displays_are_asleep();
+
+        if input_idle || displays_asleep {
+            was_paused = true;
+            macos_timer::sleep_with_leeway(
+                PAUSED_CHECK_INTERVAL_MS,
+                PAUSED_CHECK_INTERVAL_MS / 2,
+            );
+            continue;
+        }
+
+        // Resume with a short first interval so clipboard changes made while
+        // paused are picked up promptly.
+        if was_paused {
+            CURRENT_INTERVAL_MS.store(MIN_INTERVAL_MS, Ordering::Relaxed);
+            was_paused = false;
+        }
+
         let count = unsafe { NSPasteboard::generalPasteboard().changeCount() };
         let prev = LAST_CHANGE_COUNT.swap(count, Ordering::Relaxed);
         if prev != -1 && prev != count {
             return true;
         }
 
-        let now = std::time::Instant::now();
-        if now >= deadline {
-            return false;
-        }
-        std::thread::sleep(step.min(deadline - now));
+        let interval_ms = if CLIPBOARD_ACTIVITY.swap(false, Ordering::Relaxed) {
+            MIN_INTERVAL_MS
+        } else {
+            let prev_interval = CURRENT_INTERVAL_MS.load(Ordering::Relaxed);
+            (prev_interval * 2).min(MAX_INTERVAL_MS)
+        };
+        CURRENT_INTERVAL_MS.store(interval_ms, Ordering::Relaxed);
+
+        // Do not let the adaptive clipboard timer overshoot the 60-second
+        // inactivity boundary. Use zero leeway for this final partial wait.
+        let until_idle_ms = input_idle_seconds.map(|seconds| {
+            ((INPUT_IDLE_TIMEOUT_SECS - seconds).max(0.0) * 1000.0).ceil() as u64
+        });
+        let sleep_ms = until_idle_ms
+            .filter(|remaining| *remaining > 0)
+            .map(|remaining| interval_ms.min(remaining))
+            .unwrap_or(interval_ms);
+        let leeway_ms = if sleep_ms < interval_ms {
+            0
+        } else {
+            (interval_ms / 2).max(200)
+        };
+        macos_timer::sleep_with_leeway(sleep_ms, leeway_ms);
     }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub(super) fn wait_for_clipboard_update(timeout: Duration) -> bool {
-    std::thread::sleep(timeout.min(Duration::from_millis(500)));
+pub(super) fn wait_for_next_clipboard_update() -> bool {
+    use std::sync::atomic::AtomicU64;
+
+    const MIN_INTERVAL_MS: u64 = 1000;
+    const MAX_INTERVAL_MS: u64 = 5000;
+
+    static CURRENT_INTERVAL_MS: AtomicU64 = AtomicU64::new(MIN_INTERVAL_MS);
+
+    let interval = if CLIPBOARD_ACTIVITY.swap(false, Ordering::Relaxed) {
+        MIN_INTERVAL_MS
+    } else {
+        let prev = CURRENT_INTERVAL_MS.load(Ordering::Relaxed);
+        (prev * 2).min(MAX_INTERVAL_MS)
+    };
+    CURRENT_INTERVAL_MS.store(interval, Ordering::Relaxed);
+
+    std::thread::sleep(std::time::Duration::from_millis(interval));
     true
 }
 
