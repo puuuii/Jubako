@@ -224,7 +224,7 @@ mod macos_timer {
     const DISPATCH_TIME_FOREVER: DispatchTime = u64::MAX;
     const NSEC_PER_MSEC: u64 = 1_000_000;
 
-    extern "C" {
+    unsafe extern "C" {
         static _dispatch_source_type_timer: c_void;
         fn dispatch_queue_create(label: *const c_char, attr: *const c_void) -> DispatchQueue;
         fn dispatch_source_create(
@@ -270,7 +270,8 @@ mod macos_timer {
         fn new() -> Self {
             unsafe {
                 let label = b"com.jubako.clipboard_timer\0";
-                let queue = dispatch_queue_create(label.as_ptr() as *const c_char, std::ptr::null());
+                let queue =
+                    dispatch_queue_create(label.as_ptr() as *const c_char, std::ptr::null());
                 let semaphore = dispatch_semaphore_create(0);
                 let source = dispatch_source_create(
                     &_dispatch_source_type_timer as *const _ as *const c_void,
@@ -319,10 +320,7 @@ mod macos_activity {
     // event tap.
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
-        fn CGEventSourceSecondsSinceLastEventType(
-            state_id: u32,
-            event_type: u32,
-        ) -> f64;
+        fn CGEventSourceSecondsSinceLastEventType(state_id: u32, event_type: u32) -> f64;
         fn CGGetOnlineDisplayList(
             max_displays: u32,
             online_displays: *mut u32,
@@ -347,9 +345,8 @@ mod macos_activity {
 
     pub(super) fn all_displays_are_asleep() -> bool {
         let mut display_count = 0u32;
-        let first_result = unsafe {
-            CGGetOnlineDisplayList(0, std::ptr::null_mut(), &mut display_count)
-        };
+        let first_result =
+            unsafe { CGGetOnlineDisplayList(0, std::ptr::null_mut(), &mut display_count) };
 
         // Fail open: if CoreGraphics cannot report the display state, keep
         // clipboard monitoring enabled rather than silently missing copies.
@@ -367,13 +364,8 @@ mod macos_activity {
 
         let capacity = display_count;
         let mut displays = [0u32; MAX_ONLINE_DISPLAYS as usize];
-        let second_result = unsafe {
-            CGGetOnlineDisplayList(
-                capacity,
-                displays.as_mut_ptr(),
-                &mut display_count,
-            )
-        };
+        let second_result =
+            unsafe { CGGetOnlineDisplayList(capacity, displays.as_mut_ptr(), &mut display_count) };
 
         if second_result != 0 || display_count == 0 || display_count > capacity {
             return false;
@@ -411,10 +403,7 @@ pub(super) fn wait_for_next_clipboard_update() -> bool {
 
         if input_idle || displays_asleep {
             was_paused = true;
-            macos_timer::sleep_with_leeway(
-                PAUSED_CHECK_INTERVAL_MS,
-                PAUSED_CHECK_INTERVAL_MS / 2,
-            );
+            macos_timer::sleep_with_leeway(PAUSED_CHECK_INTERVAL_MS, PAUSED_CHECK_INTERVAL_MS / 2);
             continue;
         }
 
@@ -441,9 +430,8 @@ pub(super) fn wait_for_next_clipboard_update() -> bool {
 
         // Do not let the adaptive clipboard timer overshoot the 60-second
         // inactivity boundary. Use zero leeway for this final partial wait.
-        let until_idle_ms = input_idle_seconds.map(|seconds| {
-            ((INPUT_IDLE_TIMEOUT_SECS - seconds).max(0.0) * 1000.0).ceil() as u64
-        });
+        let until_idle_ms = input_idle_seconds
+            .map(|seconds| ((INPUT_IDLE_TIMEOUT_SECS - seconds).max(0.0) * 1000.0).ceil() as u64);
         let sleep_ms = until_idle_ms
             .filter(|remaining| *remaining > 0)
             .map(|remaining| interval_ms.min(remaining))
@@ -654,6 +642,23 @@ pub(super) fn apply_tool_window_style() {
 
 #[cfg(not(target_os = "macos"))]
 pub(super) fn apply_tool_window_style() {}
+
+#[cfg(target_os = "macos")]
+pub(super) fn unhide_application() {
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+
+    if let Some(mtm) = MainThreadMarker::new() {
+        let app = NSApplication::sharedApplication(mtm);
+        unsafe {
+            app.unhide(None);
+            app.activate();
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn unhide_application() {}
 
 #[cfg(target_os = "macos")]
 pub(super) fn hide_application() {

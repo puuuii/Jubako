@@ -62,8 +62,7 @@ pub(super) fn capture_initial_clipboard(
                     THUMBNAIL_MAX_HEIGHT,
                 );
                 let compressed_thumb = compress_rgba(&thumb_rgba);
-                let _ =
-                    db.insert_image_item(&description, &compressed, &compressed_thumb, tw, th);
+                let _ = db.insert_image_item(&description, &compressed, &compressed_thumb, tw, th);
             }
         }
     }
@@ -302,15 +301,21 @@ fn simulate_paste() -> Task<Message> {
 
             #[cfg(target_os = "macos")]
             {
-                let _ = tokio::task::spawn_blocking(|| {
-                    let script =
-                        r#"tell application "System Events" to keystroke "v" using command down"#;
-                    let _ = std::process::Command::new("osascript")
-                        .arg("-e")
-                        .arg(script)
-                        .status();
-                })
-                .await;
+                use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
+                use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+                if let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
+                    const KEY_V: CGKeyCode = 9;
+                    if let (Ok(down), Ok(up)) = (
+                        CGEvent::new_keyboard_event(source.clone(), KEY_V, true),
+                        CGEvent::new_keyboard_event(source, KEY_V, false),
+                    ) {
+                        down.set_flags(CGEventFlags::CGEventFlagCommand);
+                        up.set_flags(CGEventFlags::CGEventFlagCommand);
+                        down.post(CGEventTapLocation::HID);
+                        up.post(CGEventTapLocation::HID);
+                    }
+                }
             }
         },
         |_| Message::Noop,

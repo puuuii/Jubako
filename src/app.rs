@@ -1,5 +1,4 @@
 use arboard::Clipboard;
-use enigo::{Enigo, Settings};
 use global_hotkey::{
     GlobalHotKeyManager, HotKeyState,
     hotkey::{Code, HotKey, Modifiers},
@@ -9,7 +8,7 @@ use iced::{Event, Point, Size, Subscription, Task, Theme, event, mouse, window};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::db::{Db, Folder, Item};
 
@@ -42,6 +41,7 @@ enum Message {
     ClipboardUpdated,
     ToggleWindow,
     HideWindow,
+    WindowFocused,
     WindowFocusLost,
     PasteItem(String),
     PasteImageItem(i64),
@@ -78,8 +78,9 @@ struct Jubako {
     window_id: Option<window::Id>,
     is_visible: bool,
     is_visible_flag: Arc<AtomicBool>,
+    has_focused: bool,
+    shown_at: Option<Instant>,
     dialog: Option<Dialog>,
-    enigo: Arc<Mutex<Enigo>>,
     expanded_folder_actions: Option<i64>,
     dragging_item_id: Option<i64>,
     drag_over_folder: Option<Option<i64>>,
@@ -109,10 +110,6 @@ impl Jubako {
         let hotkey_id = hotkey.id();
         manager.register(hotkey).expect("Failed to register hotkey");
 
-        let enigo = Arc::new(Mutex::new(
-            Enigo::new(&Settings::default()).expect("Failed to init enigo"),
-        ));
-
         if let Err(error) = db.clear_history() {
             eprintln!("Failed to reset history on startup: {}", error);
         }
@@ -129,18 +126,20 @@ impl Jubako {
 
         let _ = std::thread::Builder::new()
             .name("jubako-clipboard-monitor".to_string())
-            .spawn(move || loop {
-                if platform::wait_for_next_clipboard_update() {
-                    let changed = clipboard::poll_clipboard_background(
-                        &monitor_db,
-                        &monitor_clipboard,
-                        &monitor_state,
-                    );
-                    if changed && monitor_visible.load(Ordering::Relaxed) {
-                        let _ = ui_tx.send(());
+            .spawn(move || {
+                loop {
+                    if platform::wait_for_next_clipboard_update() {
+                        let changed = clipboard::poll_clipboard_background(
+                            &monitor_db,
+                            &monitor_clipboard,
+                            &monitor_state,
+                        );
+                        if changed && monitor_visible.load(Ordering::Relaxed) {
+                            let _ = ui_tx.send(());
+                        }
+                    } else {
+                        std::thread::sleep(Duration::from_secs(2));
                     }
-                } else {
-                    std::thread::sleep(Duration::from_secs(2));
                 }
             });
 
@@ -157,8 +156,9 @@ impl Jubako {
             window_id: None,
             is_visible: false,
             is_visible_flag,
+            has_focused: false,
+            shown_at: None,
             dialog: None,
-            enigo,
             expanded_folder_actions: None,
             dragging_item_id: None,
             drag_over_folder: None,
@@ -272,10 +272,13 @@ impl Jubako {
 
         self.is_visible = true;
         self.is_visible_flag.store(true, Ordering::Relaxed);
+        self.has_focused = false;
+        self.shown_at = Some(Instant::now());
         self.reset_transient_state();
         clipboard::poll_clipboard_background(&self.db, &self.clipboard, &self.clipboard_state);
         platform::notify_clipboard_activity();
         self.refresh_data();
+        platform::unhide_application();
 
         let cursor_pos = platform::get_cursor_position();
         let monitor_rect = platform::get_monitor_rect_at_cursor();
@@ -337,16 +340,15 @@ impl Jubako {
             });
             self.window_id = Some(id);
 
-            Task::batch(vec![
-                open_task.map(|_| Message::Noop),
-                window::gain_focus(id),
-            ])
+            open_task.then(window::gain_focus)
         }
     }
 
     pub(super) fn hide_window(&mut self) -> Task<Message> {
         self.is_visible = false;
         self.is_visible_flag.store(false, Ordering::Relaxed);
+        self.has_focused = false;
+        self.shown_at = None;
         self.reset_transient_state();
         self.items.clear();
         platform::hide_application();
@@ -412,6 +414,7 @@ impl Jubako {
 
         let window_sub = if self.is_visible {
             event::listen_with(|event, _status, _id| match event {
+                Event::Window(window::Event::Focused) => Some(Message::WindowFocused),
                 Event::Window(window::Event::Unfocused) => Some(Message::WindowFocusLost),
                 Event::Window(window::Event::CloseRequested) => Some(Message::HideWindow),
                 _ => None,

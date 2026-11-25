@@ -1,6 +1,7 @@
 use iced::Task;
+use std::time::Duration;
 
-use super::{clipboard, Dialog, Jubako, Message, ViewMode};
+use super::{Dialog, Jubako, Message, ViewMode, clipboard};
 
 impl Jubako {
     pub(super) fn update(&mut self, message: Message) -> Task<Message> {
@@ -10,6 +11,7 @@ impl Jubako {
             Message::ClipboardUpdated => self.handle_clipboard_updated(),
             Message::ToggleWindow => self.handle_toggle_window(),
             Message::HideWindow => self.hide_window(),
+            Message::WindowFocused => self.handle_window_focused(),
             Message::WindowFocusLost => self.handle_window_focus_lost(),
             Message::PasteItem(content) => clipboard::set_text_and_simulate_paste(self, content),
             Message::PasteImageItem(item_id) => self.handle_paste_image_item(item_id),
@@ -71,8 +73,18 @@ impl Jubako {
         }
     }
 
+    fn handle_window_focused(&mut self) -> Task<Message> {
+        self.has_focused = true;
+        Task::none()
+    }
+
     fn handle_window_focus_lost(&mut self) -> Task<Message> {
-        if self.is_visible && self.dialog.is_none() {
+        let past_grace = self
+            .shown_at
+            .map(|t| t.elapsed() > Duration::from_millis(150))
+            .unwrap_or(false);
+
+        if self.is_visible && self.dialog.is_none() && self.has_focused && past_grace {
             self.hide_window()
         } else {
             Task::none()
