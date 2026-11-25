@@ -1,6 +1,9 @@
 use iced::Task;
 use std::time::Duration;
 
+use crate::db::ContentType;
+use crate::image_codec;
+
 use super::{Dialog, Jubako, Message, ViewMode, clipboard};
 
 impl Jubako {
@@ -13,8 +16,7 @@ impl Jubako {
             Message::HideWindow => self.hide_window(),
             Message::WindowFocused => self.handle_window_focused(),
             Message::WindowFocusLost => self.handle_window_focus_lost(),
-            Message::PasteItem(content) => clipboard::set_text_and_simulate_paste(self, content),
-            Message::PasteImageItem(item_id) => self.handle_paste_image_item(item_id),
+            Message::PasteItem(item_id) => self.handle_paste_item(item_id),
             Message::DeleteItem(id) => self.handle_delete_item(id),
             Message::StartDragItem(id) => self.handle_start_drag_item(id),
             Message::DragOverFolder(folder_id) => self.handle_drag_over_folder(folder_id),
@@ -43,30 +45,36 @@ impl Jubako {
     }
 
     fn handle_clipboard_updated(&mut self) -> Task<Message> {
-        if self.is_visible && self.current_view == ViewMode::History {
+        if self.window.is_visible && self.current_view == ViewMode::History {
             self.load_items();
         }
-
         Task::none()
     }
 
-    fn handle_paste_image_item(&mut self, item_id: i64) -> Task<Message> {
-        let Some(item) = self.items.iter().find(|item| item.id == item_id) else {
+    fn handle_paste_item(&mut self, item_id: i64) -> Task<Message> {
+        let Some(item) = self.items.iter().find(|item| item.id == item_id).cloned() else {
             return Task::none();
         };
-        let Some((width, height)) = clipboard::parse_image_description(&item.content_data) else {
-            return Task::none();
-        };
-        let Ok(Some(blob)) = self.db.get_item_blob(item_id) else {
-            return Task::none();
-        };
-        let rgba = clipboard::decompress_rgba(&blob, width, height);
 
-        clipboard::set_image_and_simulate_paste(self, width, height, rgba)
+        match item.content_type {
+            ContentType::Text => clipboard::set_text_and_simulate_paste(self, item.content_data),
+            ContentType::Image => {
+                let Some((width, height)) =
+                    image_codec::parse_image_description(&item.content_data)
+                else {
+                    return Task::none();
+                };
+                let Ok(Some(blob)) = self.db.get_item_blob(item_id) else {
+                    return Task::none();
+                };
+                let rgba = image_codec::decompress_rgba(&blob, width, height);
+                clipboard::set_image_and_simulate_paste(self, width, height, rgba)
+            }
+        }
     }
 
     fn handle_toggle_window(&mut self) -> Task<Message> {
-        if self.is_visible {
+        if self.window.is_visible {
             self.hide_window()
         } else {
             self.show_window()
@@ -74,17 +82,22 @@ impl Jubako {
     }
 
     fn handle_window_focused(&mut self) -> Task<Message> {
-        self.has_focused = true;
+        self.window.has_focused = true;
         Task::none()
     }
 
     fn handle_window_focus_lost(&mut self) -> Task<Message> {
         let past_grace = self
+            .window
             .shown_at
             .map(|t| t.elapsed() > Duration::from_millis(150))
             .unwrap_or(false);
 
-        if self.is_visible && self.dialog.is_none() && self.has_focused && past_grace {
+        if self.window.is_visible
+            && self.dialog.is_none()
+            && self.window.has_focused
+            && past_grace
+        {
             self.hide_window()
         } else {
             Task::none()
@@ -99,50 +112,45 @@ impl Jubako {
     }
 
     fn handle_start_drag_item(&mut self, id: i64) -> Task<Message> {
-        self.dragging_item_id = Some(id);
-        self.drag_over_folder = None;
+        self.drag.dragging_item_id = Some(id);
+        self.drag.over_target = None;
         Task::none()
     }
 
     fn handle_drag_over_folder(&mut self, folder_id: i64) -> Task<Message> {
-        if self.dragging_item_id.is_some() {
-            self.drag_over_folder = Some(Some(folder_id));
+        if self.drag.is_dragging() {
+            self.drag.over_target = Some(Some(folder_id));
         }
-
         Task::none()
     }
 
     fn handle_drag_over_history(&mut self) -> Task<Message> {
-        if self.dragging_item_id.is_some() {
-            self.drag_over_folder = Some(None);
+        if self.drag.is_dragging() {
+            self.drag.over_target = Some(None);
         }
-
         Task::none()
     }
 
     fn handle_drop_on_folder(&mut self, folder_id: i64) -> Task<Message> {
-        if let Some(item_id) = self.dragging_item_id.take() {
+        if let Some(item_id) = self.drag.dragging_item_id.take() {
             let _ = self.db.move_item_to_folder(item_id, Some(folder_id));
             self.refresh_data();
         }
-
-        self.drag_over_folder = None;
+        self.drag.over_target = None;
         Task::none()
     }
 
     fn handle_drop_on_history(&mut self) -> Task<Message> {
-        if let Some(item_id) = self.dragging_item_id.take() {
+        if let Some(item_id) = self.drag.dragging_item_id.take() {
             let _ = self.db.move_item_to_folder(item_id, None);
             self.refresh_data();
         }
-
-        self.drag_over_folder = None;
+        self.drag.over_target = None;
         Task::none()
     }
 
     fn handle_cancel_drag(&mut self) -> Task<Message> {
-        self.dragging_item_id = None;
-        self.drag_over_folder = None;
+        self.drag.clear();
         Task::none()
     }
 
@@ -165,7 +173,6 @@ impl Jubako {
                 let _ = self.db.create_folder(name.trim(), parent_id);
             }
         }
-
         self.dialog = None;
         self.refresh_data();
         Task::none()
@@ -202,7 +209,6 @@ impl Jubako {
                 let _ = self.db.rename_folder(folder_id, current_name.trim());
             }
         }
-
         self.dialog = None;
         self.refresh_data();
         Task::none()
@@ -214,7 +220,6 @@ impl Jubako {
             Some(Dialog::NewFolder { name, .. }) => *name = value,
             _ => {}
         }
-
         Task::none()
     }
 
@@ -229,7 +234,6 @@ impl Jubako {
         } else {
             self.expanded_folder_actions = Some(id);
         }
-
         Task::none()
     }
 }

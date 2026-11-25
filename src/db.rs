@@ -1,10 +1,10 @@
 use anyhow::Context;
 use chrono::Utc;
 use directories::ProjectDirs;
-use rusqlite::{params, Connection, Result};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::sync::Mutex;
+use rusqlite::{Connection, Result, params};
+use std::sync::{Mutex, MutexGuard};
+
+const SCHEMA_VERSION: i64 = 1;
 
 const CREATE_SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS folders (
@@ -30,13 +30,13 @@ CREATE TABLE IF NOT EXISTS items (
 );
 ";
 
-const ADD_CONTENT_BLOB_MIGRATION_SQL: &str = "ALTER TABLE items ADD COLUMN content_blob BLOB";
-const ADD_CONTENT_HASH_MIGRATION_SQL: &str = "ALTER TABLE items ADD COLUMN content_hash INTEGER";
-const ADD_THUMBNAIL_BLOB_MIGRATION_SQL: &str = "ALTER TABLE items ADD COLUMN thumbnail_blob BLOB";
-const ADD_THUMBNAIL_WIDTH_MIGRATION_SQL: &str =
-    "ALTER TABLE items ADD COLUMN thumbnail_width INTEGER";
-const ADD_THUMBNAIL_HEIGHT_MIGRATION_SQL: &str =
-    "ALTER TABLE items ADD COLUMN thumbnail_height INTEGER";
+const MIGRATION_V1_COLUMNS: &[&str] = &[
+    "ALTER TABLE items ADD COLUMN content_blob BLOB",
+    "ALTER TABLE items ADD COLUMN content_hash INTEGER",
+    "ALTER TABLE items ADD COLUMN thumbnail_blob BLOB",
+    "ALTER TABLE items ADD COLUMN thumbnail_width INTEGER",
+    "ALTER TABLE items ADD COLUMN thumbnail_height INTEGER",
+];
 
 const CREATE_INDEXES_SQL: &str = "
 CREATE INDEX IF NOT EXISTS idx_items_folder_created
@@ -49,6 +49,28 @@ const SELECT_ITEM_COLUMNS: &str = "
 SELECT id, folder_id, content_type, content_data, label, is_favorite
 FROM items
 ";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentType {
+    Text,
+    Image,
+}
+
+impl ContentType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Image => "image",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "image" => Self::Image,
+            _ => Self::Text,
+        }
+    }
+}
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -64,7 +86,7 @@ pub struct Folder {
 #[derive(Debug, Clone)]
 pub struct Item {
     pub id: i64,
-    pub content_type: String,
+    pub content_type: ContentType,
     pub content_data: String,
     pub label: Option<String>,
     pub is_favorite: bool,
@@ -95,80 +117,22 @@ impl Db {
         })
     }
 
-    pub fn insert_item(&self, content: &str, content_type: &str) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+    fn lock_conn(&self) -> MutexGuard<'_, Connection> {
+        self.conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn insert_text_item(&self, content: &str) -> Result<i64> {
+        let conn = self.lock_conn();
         let now = Utc::now().to_rfc3339();
-        let hash = hash_str(content);
+        let hash = fnv1a_hash_str(content);
         let mut stmt = conn.prepare_cached(
             "INSERT INTO items (folder_id, content_type, content_data, content_hash, created_at)
              VALUES (NULL, ?1, ?2, ?3, ?4)",
         )?;
-        stmt.execute(params![content_type, content, hash, now])?;
+        stmt.execute(params![ContentType::Text.as_str(), content, hash, now])?;
         Ok(conn.last_insert_rowid())
-    }
-
-    pub fn get_history(&self, limit: usize) -> Result<Vec<Item>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare_cached(&format!(
-            "{SELECT_ITEM_COLUMNS}
-             WHERE folder_id IS NULL
-             ORDER BY created_at DESC
-             LIMIT ?1"
-        ))?;
-        let rows = stmt.query_map(params![limit as i64], row_to_item)?;
-        rows.collect()
-    }
-
-    pub fn clear_history(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM items WHERE folder_id IS NULL", [])?;
-        Ok(())
-    }
-
-    pub fn get_items_in_folder(&self, folder_id: i64) -> Result<Vec<Item>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare_cached(&format!(
-            "{SELECT_ITEM_COLUMNS}
-             WHERE folder_id = ?1
-             ORDER BY created_at DESC"
-        ))?;
-        let rows = stmt.query_map(params![folder_id], row_to_item)?;
-        rows.collect()
-    }
-
-    pub fn move_item_to_folder(&self, item_id: i64, folder_id: Option<i64>) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare_cached("UPDATE items SET folder_id = ?1 WHERE id = ?2")?;
-        stmt.execute(params![folder_id, item_id])?;
-        Ok(())
-    }
-
-    pub fn delete_item(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare_cached("DELETE FROM items WHERE id = ?1")?;
-        stmt.execute(params![id])?;
-        Ok(())
-    }
-
-    pub fn check_duplicate(&self, content: &str) -> Result<Option<i64>> {
-        let conn = self.conn.lock().unwrap();
-        let hash = hash_str(content);
-        let mut stmt = conn.prepare_cached(
-            "SELECT id
-             FROM items
-             WHERE folder_id IS NULL
-               AND content_type = 'text'
-               AND content_hash = ?1
-               AND content_data = ?2
-             LIMIT 1",
-        )?;
-        let mut rows = stmt.query(params![hash, content])?;
-
-        match rows.next()? {
-            Some(row) => Ok(Some(row.get(0)?)),
-            None => Ok(None),
-        }
     }
 
     pub fn insert_image_item(
@@ -179,17 +143,18 @@ impl Db {
         thumb_width: usize,
         thumb_height: usize,
     ) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let now = Utc::now().to_rfc3339();
-        let hash = hash_str(description);
+        let hash = fnv1a_hash_str(description);
         let mut stmt = conn.prepare_cached(
             "INSERT INTO items (
                 folder_id, content_type, content_data, content_hash,
                 content_blob, thumbnail_blob, thumbnail_width, thumbnail_height, created_at
              )
-             VALUES (NULL, 'image', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
         stmt.execute(params![
+            ContentType::Image.as_str(),
             description,
             hash,
             rgba_data,
@@ -201,19 +166,19 @@ impl Db {
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn check_image_duplicate(&self, description: &str) -> Result<Option<i64>> {
-        let conn = self.conn.lock().unwrap();
-        let hash = hash_str(description);
+    pub fn check_duplicate(&self, content_type: ContentType, content_data: &str) -> Result<Option<i64>> {
+        let conn = self.lock_conn();
+        let hash = fnv1a_hash_str(content_data);
         let mut stmt = conn.prepare_cached(
             "SELECT id
              FROM items
              WHERE folder_id IS NULL
-               AND content_type = 'image'
-               AND content_hash = ?1
-               AND content_data = ?2
+               AND content_type = ?1
+               AND content_hash = ?2
+               AND content_data = ?3
              LIMIT 1",
         )?;
-        let mut rows = stmt.query(params![hash, description])?;
+        let mut rows = stmt.query(params![content_type.as_str(), hash, content_data])?;
 
         match rows.next()? {
             Some(row) => Ok(Some(row.get(0)?)),
@@ -221,8 +186,52 @@ impl Db {
         }
     }
 
+    pub fn get_history(&self, limit: usize) -> Result<Vec<Item>> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare_cached(&format!(
+            "{SELECT_ITEM_COLUMNS}
+             WHERE folder_id IS NULL
+             ORDER BY created_at DESC
+             LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(params![limit as i64], row_to_item)?;
+        rows.collect()
+    }
+
+    pub fn clear_history(&self) -> Result<()> {
+        let conn = self.lock_conn();
+        conn.execute("DELETE FROM items WHERE folder_id IS NULL", [])?;
+        Ok(())
+    }
+
+    pub fn get_items_in_folder(&self, folder_id: i64) -> Result<Vec<Item>> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare_cached(&format!(
+            "{SELECT_ITEM_COLUMNS}
+             WHERE folder_id = ?1
+             ORDER BY created_at DESC"
+        ))?;
+        let rows = stmt.query_map(params![folder_id], row_to_item)?;
+        rows.collect()
+    }
+
+    pub fn move_item_to_folder(&self, item_id: i64, folder_id: Option<i64>) -> Result<()> {
+        let conn = self.lock_conn();
+        let mut stmt =
+            conn.prepare_cached("UPDATE items SET folder_id = ?1 WHERE id = ?2")?;
+        stmt.execute(params![folder_id, item_id])?;
+        Ok(())
+    }
+
+    pub fn delete_item(&self, id: i64) -> Result<()> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare_cached("DELETE FROM items WHERE id = ?1")?;
+        stmt.execute(params![id])?;
+        Ok(())
+    }
+
     pub fn get_item_blob(&self, item_id: i64) -> Result<Option<Vec<u8>>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt =
             conn.prepare_cached("SELECT content_blob FROM items WHERE id = ?1 LIMIT 1")?;
         let mut rows = stmt.query(params![item_id])?;
@@ -234,7 +243,7 @@ impl Db {
     }
 
     pub fn get_item_thumbnail(&self, item_id: i64) -> Result<Option<(Vec<u8>, usize, usize)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare_cached(
             "SELECT thumbnail_blob, thumbnail_width, thumbnail_height
              FROM items
@@ -260,7 +269,7 @@ impl Db {
     }
 
     pub fn get_folders(&self) -> Result<Vec<Folder>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare_cached(
             "SELECT id, parent_id, name, created_at
              FROM folders
@@ -271,7 +280,7 @@ impl Db {
     }
 
     pub fn create_folder(&self, name: &str, parent_id: Option<i64>) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let now = Utc::now().to_rfc3339();
         let mut stmt = conn.prepare_cached(
             "INSERT INTO folders (parent_id, name, created_at)
@@ -282,24 +291,30 @@ impl Db {
     }
 
     pub fn delete_folder(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare_cached("DELETE FROM folders WHERE id = ?1")?;
         stmt.execute(params![id])?;
         Ok(())
     }
 
     pub fn rename_folder(&self, id: i64, new_name: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare_cached("UPDATE folders SET name = ?1 WHERE id = ?2")?;
         stmt.execute(params![new_name, id])?;
         Ok(())
     }
 }
 
-fn hash_str(value: &str) -> i64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish() as i64
+fn fnv1a_hash_str(value: &str) -> i64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in value.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash as i64
 }
 
 fn data_dir() -> anyhow::Result<std::path::PathBuf> {
@@ -316,7 +331,7 @@ fn initialize_connection(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(CREATE_SCHEMA_SQL)
         .context("Failed to create tables")?;
 
-    run_migrations(conn);
+    run_migrations(conn)?;
 
     conn.execute_batch(CREATE_INDEXES_SQL)
         .context("Failed to create indexes")?;
@@ -324,18 +339,32 @@ fn initialize_connection(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_migrations(conn: &Connection) {
-    let _ = conn.execute_batch(ADD_CONTENT_BLOB_MIGRATION_SQL);
-    let _ = conn.execute_batch(ADD_CONTENT_HASH_MIGRATION_SQL);
-    let _ = conn.execute_batch(ADD_THUMBNAIL_BLOB_MIGRATION_SQL);
-    let _ = conn.execute_batch(ADD_THUMBNAIL_WIDTH_MIGRATION_SQL);
-    let _ = conn.execute_batch(ADD_THUMBNAIL_HEIGHT_MIGRATION_SQL);
+fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .context("Failed to read schema user_version")?;
+
+    if version < SCHEMA_VERSION {
+        for sql in MIGRATION_V1_COLUMNS {
+            if let Err(err) = conn.execute_batch(sql) {
+                let msg = err.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(err).with_context(|| format!("Migration failed: {sql}"));
+                }
+            }
+        }
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
+            .context("Failed to update schema user_version")?;
+    }
+
+    Ok(())
 }
 
 fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
+    let content_type_str: String = row.get(2)?;
     Ok(Item {
         id: row.get(0)?,
-        content_type: row.get(2)?,
+        content_type: ContentType::from_db(&content_type_str),
         content_data: row.get(3)?,
         label: row.get(4)?,
         is_favorite: row.get::<_, i64>(5)? != 0,
